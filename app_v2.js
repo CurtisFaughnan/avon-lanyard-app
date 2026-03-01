@@ -1,5 +1,5 @@
 import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/esm/index.min.js";
-
+document.getElementById("status").textContent = "✅ app_v2.js loaded";
 const cfg = window.APP_CONFIG;
 
 /************ ELEMENTS ************/
