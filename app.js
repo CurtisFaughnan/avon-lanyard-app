@@ -165,3 +165,4 @@ function stopCamera() {
 
 scanBtn.addEventListener("click", startCamera);
 closeBtn.addEventListener("click", stopCamera);
+
