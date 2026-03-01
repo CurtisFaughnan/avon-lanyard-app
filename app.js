@@ -18,16 +18,19 @@ const scannerWrap = document.getElementById("scanner");
 const videoEl = document.getElementById("video");
 const closeBtn = document.getElementById("closeScan");
 
-titleEl.textContent = cfg.appLabel;
+titleEl.textContent = cfg?.appLabel || "Scanner App";
 
 function setStatus(msg) {
-  statusEl.textContent = msg;
+  statusEl.textContent = msg || "";
 }
 
 async function apiGet(action, params) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
-  if (cfg.schoolKey) url.searchParams.set("school_key", cfg.schoolKey);
+
+  // IMPORTANT: include school_key on every request
+  url.searchParams.set("school_key", cfg.schoolKey);
+
   Object.entries(params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
   const res = await fetch(url.toString(), { method: "GET" });
   return await res.json();
@@ -36,73 +39,86 @@ async function apiGet(action, params) {
 async function apiPost(action, body) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
+
+  const payload = { ...(body || {}), school_key: cfg.schoolKey };
+
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({ school_key: cfg.schoolKey, ...(body || {}) })
+    body: JSON.stringify(payload)
   });
+
   return await res.json();
 }
 
 async function lookupAndLog() {
-  const sid = studentIdEl.value.trim();
-  if (!sid) return;
+  try {
+    const sid = studentIdEl.value.trim();
+    if (!sid) {
+      setStatus("Enter a student ID.");
+      return;
+    }
 
-  emailBtn.style.display = "none";
-  setStatus("Looking up...");
+    emailBtn.style.display = "none";
+    setStatus("Looking up...");
 
-  const s = await apiGet("getStudent", { student_id: sid });
+    const s = await apiGet("getStudent", { student_id: sid });
 
-  if (!s.ok) {
-    setStatus(`Error: ${s.error || "unknown error"}`);
-    return;
-  }
+    if (!s.ok) {
+      setStatus(`Lookup error: ${s.error || "unknown"}`);
+      return;
+    }
 
-  if (!s.found) {
-    nameEl.textContent = "-";
-    yearEl.textContent = "-";
-    teamEl.textContent = "-";
-    countEl.textContent = "-";
-    setStatus("Student not found.");
-    return;
-  }
+    if (!s.found) {
+      nameEl.textContent = "-";
+      yearEl.textContent = "-";
+      teamEl.textContent = "-";
+      countEl.textContent = "-";
+      setStatus("Student not found.");
+      return;
+    }
 
-  nameEl.textContent = `${s.first_name} ${s.last_name}`;
-  yearEl.textContent = s.class_year || "";
-  teamEl.textContent = s.team || "";
+    nameEl.textContent = `${s.first_name} ${s.last_name}`;
+    yearEl.textContent = s.class_year || "";
+    teamEl.textContent = s.team || "";
 
-  setStatus("Logging...");
-  const r = await apiPost("logScan", {
-    student_id: sid,
-    device_name: navigator.userAgent,
-    ts: new Date().toISOString()
-  });
+    setStatus("Logging...");
 
-  if (!r.ok) {
-    setStatus(`Error: ${r.error || "unknown error"}`);
-    return;
-  }
-
-  if (!r.found) {
-    setStatus("Student not found (log).");
-    return;
-  }
-
-  countEl.textContent = String(r.total_count);
-  setStatus("Logged.");
-
-  // show Email Home button
-  emailBtn.style.display = "inline-block";
-  emailBtn.onclick = async () => {
-    emailBtn.disabled = true;
-    setStatus("Sending email...");
-    const e = await apiPost("sendEmailHome", {
+    const r = await apiPost("logScan", {
       student_id: sid,
-      total_count: r.total_count
+      device_name: navigator.userAgent,
+      ts: new Date().toISOString()
     });
-    setStatus(e.ok ? "Email sent." : `Email failed: ${e.error || "unknown error"}`);
-    emailBtn.disabled = false;
-  };
+
+    if (!r.ok) {
+      setStatus(`Log error: ${r.error || "unknown"}`);
+      return;
+    }
+
+    if (!r.found) {
+      setStatus("Could not log scan (student not found).");
+      return;
+    }
+
+    countEl.textContent = String(r.total_count);
+    setStatus("Logged.");
+
+    // show Email Home button
+    emailBtn.style.display = "inline-block";
+    emailBtn.onclick = async () => {
+      try {
+        emailBtn.disabled = true;
+        setStatus("Sending email...");
+        const e = await apiPost("sendEmailHome", { student_id: sid, total_count: r.total_count });
+        setStatus(e.ok ? "Email sent." : `Email failed: ${e.error || "unknown error"}`);
+      } finally {
+        emailBtn.disabled = false;
+      }
+    };
+
+  } catch (err) {
+    setStatus(`App error: ${String(err)}`);
+  }
 }
 
 // USB scanner usually ends with Enter:
@@ -115,22 +131,30 @@ lookupBtn.addEventListener("click", lookupAndLog);
 let stopFn = null;
 
 async function startCamera() {
-  scannerWrap.style.display = "block";
-  const reader = new BrowserMultiFormatReader();
+  try {
+    scannerWrap.style.display = "block";
+    setStatus("Opening camera...");
 
-  const controls = await reader.decodeFromConstraints(
-    { video: { facingMode: "environment" } },
-    videoEl,
-    (result) => {
-      if (result) {
-        studentIdEl.value = result.getText();
-        stopCamera();
-        lookupAndLog();
+    const reader = new BrowserMultiFormatReader();
+
+    const controls = await reader.decodeFromConstraints(
+      { video: { facingMode: "environment" } },
+      videoEl,
+      (result) => {
+        if (result) {
+          studentIdEl.value = result.getText();
+          stopCamera();
+          lookupAndLog();
+        }
       }
-    }
-  );
+    );
 
-  stopFn = () => controls.stop();
+    stopFn = () => controls.stop();
+    setStatus("Scanning...");
+  } catch (err) {
+    setStatus(`Camera error: ${String(err)}`);
+    stopCamera();
+  }
 }
 
 function stopCamera() {
