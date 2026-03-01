@@ -1,46 +1,42 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <link rel="manifest" href="manifest.json" />
-  <title>Scanner App</title>
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 16px; }
-    input, button { font-size: 18px; padding: 12px; }
-    #scanner { display:none; position:fixed; inset:0; background:#000; }
-    #video { width: 100%; height: 70vh; object-fit: cover; }
-    .card { padding: 12px; border: 1px solid #ddd; border-radius: 12px; margin-top: 12px; }
-  </style>
+  <title>Lanyard App</title>
+
+  <link rel="manifest" href="./manifest.json" />
 </head>
 <body>
-  <h2 id="title"></h2>
+  <h2 id="title">Loading...</h2>
 
-  <div class="card">
-    <input id="studentId" placeholder="Scan or enter Student ID" autocomplete="off" />
-    <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
-      <button id="lookupBtn">Submit</button>
-      <button id="scanBtn">Scan with Camera</button>
+  <div style="max-width:420px;">
+    <input id="studentId" placeholder="Scan or enter Student ID" style="width:100%; font-size:20px; padding:14px;" />
+    <button id="lookupBtn" style="width:100%; font-size:22px; padding:16px; margin-top:10px;">Submit</button>
+    <button id="scanBtn" style="width:100%; font-size:22px; padding:16px; margin-top:10px;">Scan with Camera</button>
+
+    <button id="emailBtn" style="display:none; width:100%; font-size:18px; padding:14px; margin-top:10px;">
+      Email Home
+    </button>
+
+    <p id="status" style="margin-top:12px; font-family:Arial;"></p>
+
+    <div style="margin-top:18px; border:1px solid #ccc; padding:14px; border-radius:12px;">
+      <div><b>Name:</b> <span id="name">-</span></div>
+      <div><b>Class Year:</b> <span id="year">-</span></div>
+      <div><b>Team:</b> <span id="team">-</span></div>
+      <div style="margin-top:10px;"><b>Total:</b> <span id="count">-</span></div>
     </div>
   </div>
 
-  <div class="card">
-    <div><b>Name:</b> <span id="name">-</span></div>
-    <div><b>Class Year:</b> <span id="year">-</span></div>
-    <div><b>Team:</b> <span id="team">-</span></div>
-    <div style="margin-top:10px;"><b>Total:</b> <span id="count">-</span></div>
-    <div id="status" style="margin-top:10px;"></div>
-    <button id="emailBtn" style="margin-top:10px; display:none;">Email Home</button>
+  <!-- Camera overlay -->
+  <div id="scanner" style="display:none; position:fixed; inset:0; background:#000; z-index:9999;">
+    <video id="video" style="width:100%; height:80vh; object-fit:cover;" autoplay playsinline></video>
+    <button id="closeScan" style="width:100%; padding:16px; font-size:20px;">Close</button>
   </div>
 
-  <div id="scanner">
-    <video id="video" playsinline></video>
-    <div style="padding:12px; display:flex; gap:10px;">
-      <button id="closeScan">Close</button>
-    </div>
-  </div>
-
-  <script src="config.js"></script>
-  <script type="module" src="app.js"></script>
+  <!-- Load config first, then app -->
+  <script src="./config.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>
