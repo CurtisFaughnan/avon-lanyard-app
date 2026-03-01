@@ -1,5 +1,4 @@
 import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/esm/index.min.js";
-
 const cfg = window.APP_CONFIG;
 
 const titleEl = document.getElementById("title");
@@ -165,4 +164,5 @@ function stopCamera() {
 
 scanBtn.addEventListener("click", startCamera);
 closeBtn.addEventListener("click", stopCamera);
+
 
