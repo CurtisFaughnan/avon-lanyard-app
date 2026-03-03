@@ -48,6 +48,7 @@ async function apiGet(action, params) {
 async function apiPost(action, body) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
+
   const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
   // text/plain avoids CORS preflight in many browsers (good for iOS Safari)
@@ -70,15 +71,16 @@ async function processScan(id, source) {
   const sid = String(id || "").trim();
   if (!sid) return;
 
+  // De-dupe repeated camera fires
   const now = Date.now();
   if (sid === lastScanned && now - lastScanAt < 1500) return;
   lastScanned = sid;
   lastScanAt = now;
 
-  studentIdEl.value = sid;
+  if (studentIdEl) studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // ✅ ONE CALL ONLY (backend logScan returns student + total_count + tier)
+  // ✅ ONE CALL: Code.gs logScan returns student + total_count + tier
   const logRes = await apiPost("logScan", {
     student_id: sid,
     device_name: navigator.userAgent,
@@ -90,22 +92,24 @@ async function processScan(id, source) {
   }
 
   if (!logRes.found) {
-    nameEl.textContent = "-";
-    yearEl.textContent = "-";
-    teamEl.textContent = "-";
-    countEl.textContent = "-";
+    if (nameEl) nameEl.textContent = "-";
+    if (yearEl) yearEl.textContent = "-";
+    if (teamEl) teamEl.textContent = "-";
+    if (countEl) countEl.textContent = "-";
     setTierColor("");
     setStatus("Student not found.");
     return;
   }
 
   const st = logRes.student || {};
-  nameEl.textContent =
-    st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
-  yearEl.textContent = st.grade ?? st.class_year ?? "-";
-  teamEl.textContent = st.team || "-";
+  if (nameEl) {
+    nameEl.textContent =
+      st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
+  }
+  if (yearEl) yearEl.textContent = st.grade ?? st.class_year ?? "-";
+  if (teamEl) teamEl.textContent = st.team || "-";
 
-  countEl.textContent = String(logRes.total_count ?? "-");
+  if (countEl) countEl.textContent = String(logRes.total_count ?? "-");
   const tier = logRes.tier || {};
   setTierColor(tier.color || "");
   setStatus(tier.label ? `Logged ✅ (${tier.label})` : "Logged ✅");
@@ -126,6 +130,7 @@ async function handleId(sid, source = "manual") {
     processing = false;
   }
 
+  // If another scan came in while logging, process it next
   if (queuedId) {
     const next = queuedId;
     queuedId = null;
@@ -133,41 +138,47 @@ async function handleId(sid, source = "manual") {
   }
 }
 
-lookupBtn?.addEventListener("click", () => handleId(studentIdEl.value, "submit"));
+lookupBtn?.addEventListener("click", () => handleId(studentIdEl?.value, "submit"));
 studentIdEl?.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") handleId(studentIdEl.value, "enter");
+  if (e.key === "Enter") handleId(studentIdEl?.value, "enter");
 });
 
 /************ CAMERA ************/
 let controls = null;
-let track = null;
 
 function buildReader() {
-  // ✅ No hints = multi-format decoding (fixes “won’t scan” when barcode isn’t CODE_128)
-  return new BrowserMultiFormatReader(undefined, {
-    delayBetweenScanAttempts: 30,
+  const hints = new Map();
+
+  // Your badge: 14-digit numeric -> commonly ITF / ITF-14
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+    BarcodeFormat.ITF,
+    BarcodeFormat.CODE_128,
+
+    // harmless backups (won’t slow much)
+    BarcodeFormat.EAN_13,
+    BarcodeFormat.UPC_A,
+    BarcodeFormat.CODABAR,
+    BarcodeFormat.CODE_39,
+  ]);
+
+  hints.set(DecodeHintType.TRY_HARDER, true);
+
+  return new BrowserMultiFormatReader(hints, {
+    delayBetweenScanAttempts: 20,
     delayBetweenScanSuccess: 250,
   });
 }
 
-async function trySetZoom(z) {
-  try {
-    if (!track) return;
-    const caps = track.getCapabilities?.();
-    if (!caps?.zoom) return;
-    const zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, z));
-    await track.applyConstraints({ advanced: [{ zoom }] });
-  } catch (_) {}
-}
+async function pickBackCameraDeviceId(reader) {
+  const devices = await reader.listVideoInputDevices();
 
-async function trySetFocusContinuous() {
-  try {
-    if (!track) return;
-    const caps = track.getCapabilities?.();
-    if (caps?.focusMode?.includes?.("continuous")) {
-      await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
-    }
-  } catch (_) {}
+  // On iOS, labels show up after the user grants camera permission
+  const byLabel =
+    devices.find((d) => /back|rear|environment/i.test(d.label || "")) ||
+    devices[devices.length - 1] ||
+    devices[0];
+
+  return byLabel?.deviceId;
 }
 
 async function startCamera() {
@@ -176,6 +187,7 @@ async function startCamera() {
   setStatus("Opening camera…");
 
   if (videoEl) {
+    // iOS Safari needs this to avoid fullscreen video
     videoEl.setAttribute("playsinline", "");
     videoEl.muted = true;
     videoEl.autoplay = true;
@@ -186,29 +198,29 @@ async function startCamera() {
 
   const reader = buildReader();
 
-  const constraints = {
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-    },
-  };
-
   try {
-    controls = await reader.decodeFromConstraints(constraints, videoEl, (result) => {
+    // Force permission prompt so device labels become available
+    await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" },
+      audio: false,
+    });
+
+    const deviceId = await pickBackCameraDeviceId(reader);
+
+    // ✅ More reliable on iOS: decodeFromVideoDevice with explicit deviceId
+    controls = await reader.decodeFromVideoDevice(deviceId, videoEl, (result) => {
       if (!result) return;
       const text = result.getText?.();
       if (!text) return;
       handleId(String(text).trim(), "camera");
     });
 
-    const stream = videoEl?.srcObject;
-    track = stream?.getVideoTracks?.()[0] || null;
+    // Some iPhones need a play() nudge
+    try {
+      await videoEl?.play?.();
+    } catch (_) {}
 
-    await trySetFocusContinuous();
-    await trySetZoom(1.5);
-
-    setStatus("Camera ready — scan a barcode.");
+    setStatus("Camera ready — scan the barcode.");
   } catch (e) {
     setStatus("Camera error: " + String(e));
     stopCamera();
@@ -216,11 +228,10 @@ async function startCamera() {
 }
 
 function stopCamera() {
-  try { controls?.stop(); } catch (_) {}
+  try {
+    controls?.stop();
+  } catch (_) {}
   controls = null;
-
-  try { track?.stop(); } catch (_) {}
-  track = null;
 
   setStatus("Camera stopped.");
 }
@@ -230,6 +241,8 @@ stopBtn?.addEventListener("click", stopCamera);
 
 /************ WARM-UP ************/
 (async () => {
-  try { await apiGet("ping"); } catch (_) {}
+  try {
+    await apiGet("ping");
+  } catch (_) {}
   setStatus("Ready.");
 })();
