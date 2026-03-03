@@ -1,5 +1,6 @@
 import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm";
 import { BarcodeFormat, DecodeHintType } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/+esm";
+
 const cfg = window.APP_CONFIG;
 
 /************ ELEMENTS ************/
@@ -14,10 +15,10 @@ const statusEl = document.getElementById("status");
 const videoEl = document.getElementById("video");
 const scanBtn = document.getElementById("scanBtn");
 const stopBtn = document.getElementById("closeScan");
-const cardEl = document.getElementById("card"); // optional
+const cardEl = document.getElementById("card");
 
 /************ INIT ************/
-if (titleEl) titleEl.textContent = cfg?.appLabel || "Scanner App";
+if (titleEl) titleEl.textContent = cfg?.appLabel || "Lanyard App";
 
 function setStatus(msg) {
   if (statusEl) statusEl.textContent = msg || "";
@@ -34,14 +35,6 @@ function setTierColor(colorCss) {
   cardEl.classList.add("tierGlow");
 }
 
-/**
- * Keep your existing guide elements (index.html has them),
- * and don’t force a fullscreen overlay here.
- */
-function ensureScanOverlay() {
-  // no-op: your HTML already shows the “Place barcode…” box
-}
-
 /************ API ************/
 async function apiGet(action, params) {
   const url = new URL(cfg.apiUrl);
@@ -55,9 +48,10 @@ async function apiGet(action, params) {
 async function apiPost(action, body) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
+
   const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
-  // text/plain avoids CORS preflight in most browsers (including iOS Safari)
+  // text/plain avoids CORS preflight in many cases (good for iOS Safari too)
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -70,8 +64,6 @@ async function apiPost(action, body) {
 /************ MAIN FLOW ************/
 let lastScanned = "";
 let lastScanAt = 0;
-
-// prevent decode loop from being blocked
 let processing = false;
 let queuedId = null;
 
@@ -79,7 +71,6 @@ async function processScan(id, source) {
   const sid = String(id || "").trim();
   if (!sid) return;
 
-  // de-dupe (prevents double logs if camera fires twice)
   const now = Date.now();
   if (sid === lastScanned && now - lastScanAt < 1500) return;
   lastScanned = sid;
@@ -88,7 +79,7 @@ async function processScan(id, source) {
   studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // ✅ ONE CALL ONLY: backend logScan returns student + total_count + tier
+  // ✅ ONE CALL: Code.gs logScan already returns student + totals
   const logRes = await apiPost("logScan", {
     student_id: sid,
     device_name: navigator.userAgent,
@@ -122,7 +113,6 @@ async function processScan(id, source) {
 }
 
 async function handleId(sid, source = "manual") {
-  // queue latest scan if already processing
   if (processing) {
     queuedId = String(sid || "").trim();
     return;
@@ -137,7 +127,6 @@ async function handleId(sid, source = "manual") {
     processing = false;
   }
 
-  // if something arrived while we were logging, process it next
   if (queuedId) {
     const next = queuedId;
     queuedId = null;
@@ -157,7 +146,7 @@ let track = null;
 function buildReader() {
   const hints = new Map();
 
-  // ✅ Numeric barcodes are often ITF / EAN / UPC / CODE_128
+  // ✅ Numeric badges are commonly ITF / EAN / UPC / CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
     BarcodeFormat.ITF,
     BarcodeFormat.EAN_13,
@@ -166,7 +155,7 @@ function buildReader() {
     BarcodeFormat.UPC_E,
     BarcodeFormat.CODE_128,
     BarcodeFormat.CODABAR,
-    BarcodeFormat.CODE_39, // harmless to include; still fast enough
+    BarcodeFormat.CODE_39,
   ]);
 
   hints.set(DecodeHintType.TRY_HARDER, true);
@@ -187,18 +176,6 @@ async function trySetZoom(z) {
   } catch (_) {}
 }
 
-async function trySetTorch(on) {
-  try {
-    if (!track) return false;
-    const caps = track.getCapabilities?.();
-    if (!caps?.torch) return false;
-    await track.applyConstraints({ advanced: [{ torch: !!on }] });
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
 async function trySetFocusContinuous() {
   try {
     if (!track) return;
@@ -209,44 +186,11 @@ async function trySetFocusContinuous() {
   } catch (_) {}
 }
 
-function ensureTorchButton() {
-  if (document.getElementById("torchBtn")) return;
-  const wrap = videoEl?.parentElement;
-  if (!wrap) return;
-
-  if (!wrap.style.position) wrap.style.position = "relative";
-
-  const btn = document.createElement("button");
-  btn.id = "torchBtn";
-  btn.textContent = "Torch";
-  btn.style.position = "absolute";
-  btn.style.top = "12px";
-  btn.style.right = "12px";
-  btn.style.zIndex = "10000";
-  btn.style.padding = "12px 14px";
-  btn.style.fontSize = "16px";
-
-  let torchOn = false;
-  btn.addEventListener("click", async () => {
-    torchOn = !torchOn;
-    const ok = await trySetTorch(torchOn);
-    if (!ok) {
-      torchOn = false;
-      setStatus("Torch not supported.");
-    } else {
-      setStatus(torchOn ? "Torch ON" : "Torch OFF");
-    }
-  });
-
-  wrap.appendChild(btn);
-}
-
 async function startCamera() {
   if (controls) return;
 
   setStatus("Opening camera…");
 
-  // iOS/Safari reliability
   if (videoEl) {
     videoEl.setAttribute("playsinline", "");
     videoEl.muted = true;
@@ -255,8 +199,6 @@ async function startCamera() {
     videoEl.style.height = "100%";
     videoEl.style.objectFit = "cover";
   }
-
-  ensureScanOverlay();
 
   const reader = buildReader();
 
@@ -280,9 +222,8 @@ async function startCamera() {
     track = stream?.getVideoTracks?.()[0] || null;
 
     await trySetFocusContinuous();
-    await trySetZoom(1.5); // modest zoom works best on iPhone
+    await trySetZoom(1.5);
 
-    ensureTorchButton();
     setStatus("Camera ready — scan a barcode.");
   } catch (e) {
     setStatus("Camera error: " + String(e));
@@ -297,15 +238,13 @@ function stopCamera() {
   try { track?.stop(); } catch (_) {}
   track = null;
 
-  try { document.getElementById("torchBtn")?.remove(); } catch (_) {}
-
   setStatus("Camera stopped.");
 }
 
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
-/************ WARM-UP (reduces “first scan” slowness) ************/
+/************ WARM-UP ************/
 (async () => {
   try {
     await apiGet("ping");
