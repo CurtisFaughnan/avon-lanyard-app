@@ -1,260 +1,288 @@
-// scanner_v1.js  (ES module)
+/************** CONFIG **************/
+const ROSTER_SHEET_ID = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
+const ROSTER_TAB_NAME = "Lanyard_Data";
 
-// ZXing camera scanner (Skypack works well on GitHub Pages)
-import { BrowserMultiFormatReader } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
+const LOG_SHEET_ID = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
+const LOG_TAB_NAME = "lanyard_log";
 
-const cfg = window.APP_CONFIG || {};
-if (!cfg.apiUrl) {
-  console.error("Missing APP_CONFIG.apiUrl in config.js");
-}
+const COUNTS_TAB_NAME = "Counts";          // created if missing
+const THRESHOLDS_TAB_NAME = "Thresholds";  // uses your Thresholds sheet
 
-/************ ELEMENTS ************/
-const titleEl = document.getElementById("title");
-const studentIdEl = document.getElementById("studentId");
-const lookupBtn = document.getElementById("lookupBtn");
-const scanBtn = document.getElementById("scanBtn");
-const emailBtn = document.getElementById("emailBtn");
+const APP_NAME = "Lanyard";
 
-const nameEl = document.getElementById("name");
-const yearEl = document.getElementById("year");
-const teamEl = document.getElementById("team");
-const countEl = document.getElementById("count");
-const statusEl = document.getElementById("status");
+// Shared secret so only your distributed app can call the API
+const SCHOOL_KEY = "AVON-LANYARD-2026-SECURE";
 
-// Optional elements (only if your HTML has them)
-const tierEl = document.getElementById("tier");           // optional: shows tier label
-const resultCardEl = document.getElementById("resultCard"); // optional: card to color
-const pageWrapEl = document.getElementById("pageWrap");   // optional wrapper to color
-
-const scannerWrap = document.getElementById("scanner");
-const videoEl = document.getElementById("video");
-const closeBtn = document.getElementById("closeScan");
-
-/************ INIT ************/
-if (titleEl) titleEl.textContent = cfg.appLabel || "Scanner App";
-if (statusEl) statusEl.textContent = "Ready.";
-
-// Email button starts hidden until a student is logged
-if (emailBtn) emailBtn.style.display = "none";
-
-/************ HELPERS ************/
-function setStatus(msg) {
-  if (statusEl) statusEl.textContent = msg || "";
-}
-
-function safeText(el, txt) {
-  if (el) el.textContent = txt ?? "";
-}
-
-function flashSuccess_() {
-  // quick visual confirmation
-  const el = resultCardEl || pageWrapEl || document.body;
-  const prev = el.style.outline;
-  el.style.outline = "4px solid rgba(0, 200, 83, 0.9)";
-  setTimeout(() => (el.style.outline = prev), 300);
-}
-
-// Uses returned tier color/label to color UI
-function applyTierUI_(tier, count) {
-  if (!tier) return;
-
-  // label
-  if (tierEl) safeText(tierEl, tier.label ? `${tier.label} (count: ${count})` : `Count: ${count}`);
-
-  // color: prefer coloring a card; fallback to page
-  const color = tier.color || "";
-  if (!color) return;
-
-  const target = resultCardEl || pageWrapEl;
-  if (target) {
-    target.style.border = `4px solid ${color}`;
-    target.style.boxShadow = `0 0 0 4px ${color}33`;
-  } else {
-    // last resort: tint background slightly (not full, just a hint)
-    document.body.style.background = color;
+/************** AUTH **************/
+function requireKey_(provided) {
+  if (String(provided || "").trim() !== String(SCHOOL_KEY).trim()) {
+    throw new Error("Unauthorized");
   }
 }
 
-async function apiGet(action, params) {
-  const url = new URL(cfg.apiUrl);
-  url.searchParams.set("action", action);
-  url.searchParams.set("school_key", cfg.schoolKey || "");
-
-  Object.entries(params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
-
-  const res = await fetch(url.toString(), { method: "GET" });
-  return await res.json();
+/************** OUTPUT **************/
+function jsonOut(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
-async function apiPost(action, body) {
-  const url = new URL(cfg.apiUrl);
-  url.searchParams.set("action", action);
-
-  const payload = { ...(body || {}), school_key: cfg.schoolKey || "" };
-
-  const res = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" },
-    body: JSON.stringify(payload)
-  });
-
-  return await res.json();
+/************** SHEETS **************/
+function getSheet_(spreadsheetId, tabName) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
+  let sh = ss.getSheetByName(tabName);
+  if (!sh) sh = ss.insertSheet(tabName);
+  return sh;
 }
 
-/************ MAIN FLOW ************/
-async function lookupAndLog() {
-  try {
-    const sid = (studentIdEl?.value || "").trim();
-    if (!sid) {
-      setStatus("Enter a student ID.");
-      return;
-    }
+function ensureLogHeader_(sh) {
+  const desired = ["date", "student_id", "name", "grade", "team", "violations_after_reset", "parent_email"];
+  if (sh.getLastRow() === 0) sh.appendRow(desired);
+  return desired;
+}
 
-    // Hide email until we successfully log
-    if (emailBtn) emailBtn.style.display = "none";
-    setStatus("Looking up...");
+function ensureCountsHeader_(sh) {
+  const desired = ["student_id", "count", "last_updated"];
+  if (sh.getLastRow() === 0) sh.appendRow(desired);
+  return desired;
+}
 
-    // 1) Lookup student
-    const student = await apiGet("getStudent", { student_id: sid });
+/************** ROSTER CACHE + LOOKUP **************/
+function rosterCacheKey_() {
+  return `ROSTER_${ROSTER_SHEET_ID}_${ROSTER_TAB_NAME}`;
+}
 
-    if (!student.ok) {
-      setStatus("Lookup error: " + (student.error || "unknown"));
-      return;
-    }
+function getRosterCached_() {
+  const cache = CacheService.getScriptCache();
+  const key = rosterCacheKey_();
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
 
-    if (!student.found) {
-      setStatus("Student not found.");
-      safeText(nameEl, "-");
-      safeText(yearEl, "-");
-      safeText(teamEl, "-");
-      safeText(countEl, "-");
-      if (tierEl) safeText(tierEl, "-");
-      return;
-    }
+  const sh = getSheet_(ROSTER_SHEET_ID, ROSTER_TAB_NAME);
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return { headers: [], rows: [] };
 
-    safeText(nameEl, `${student.first_name} ${student.last_name}`.trim());
-    safeText(yearEl, student.grade || student.class_year || "-"); // supports either field
-    safeText(teamEl, student.team || "-");
+  const headers = values[0].map(h => String(h).trim());
+  const rows = values.slice(1);
 
-    // 2) Log scan
-    setStatus("Logging...");
+  const obj = { headers, rows };
+  cache.put(key, JSON.stringify(obj), 300); // 5 min
+  return obj;
+}
 
-    const logRes = await apiPost("logScan", {
-      student_id: sid,
-      device_name: navigator.userAgent,
-      ts: new Date().toISOString()
-    });
+function findStudentById_(studentId) {
+  const { headers, rows } = getRosterCached_();
 
-    if (!logRes.ok) {
-      setStatus("Log error: " + (logRes.error || "unknown"));
-      return;
-    }
+  const idx = {
+    student_id: headers.indexOf("student_id"),
+    first_name: headers.indexOf("first_name"),
+    last_name: headers.indexOf("last_name"),
+    class_year: headers.indexOf("class_year"),
+    team: headers.indexOf("team"),
+    parent_email: headers.indexOf("parent_email"),
+  };
 
-    safeText(countEl, String(logRes.total_count ?? ""));
-    setStatus("Logged.");
-    flashSuccess_();
+  if (idx.student_id === -1) throw new Error("Roster missing column: student_id");
 
-    // 3) Apply tier UI if provided
-    applyTierUI_(logRes.tier, logRes.total_count);
+  const target = String(studentId).trim();
+  for (const r of rows) {
+    if (String(r[idx.student_id]).trim() === target) {
+      const first = idx.first_name !== -1 ? String(r[idx.first_name] ?? "") : "";
+      const last  = idx.last_name  !== -1 ? String(r[idx.last_name] ?? "") : "";
+      const grade = idx.class_year !== -1 ? String(r[idx.class_year] ?? "") : "";
+      const team  = idx.team       !== -1 ? String(r[idx.team] ?? "") : "";
+      const email = idx.parent_email !== -1 ? String(r[idx.parent_email] ?? "") : "";
+      const name  = `${first} ${last}`.trim();
 
-    // 4) Enable Email Home with password prompt
-    if (emailBtn) {
-      emailBtn.style.display = "inline-block";
-      emailBtn.onclick = async () => {
-        const pass = prompt("Enter Email Home password:");
-        if (!pass) {
-          setStatus("Email canceled.");
-          return;
-        }
-
-        try {
-          emailBtn.disabled = true;
-          setStatus("Sending email...");
-
-          const emailRes = await apiPost("sendEmailHome", {
-            student_id: sid,
-            total_count: logRes.total_count,
-            email_password: pass
-          });
-
-          setStatus(emailRes.ok ? "Email sent." : ("Email failed: " + (emailRes.error || "unknown")));
-        } finally {
-          emailBtn.disabled = false;
-        }
+      return {
+        found: true,
+        student_id: target,
+        first_name: first,
+        last_name: last,
+        name,
+        grade,
+        team,
+        parent_email: email
       };
     }
-
-  } catch (err) {
-    setStatus("App error: " + String(err?.message || err));
   }
+  return { found: false };
 }
 
-/************ INPUT EVENTS ************/
-// USB scanners typically send digits then Enter
-studentIdEl?.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    lookupAndLog();
+/************** COUNTS (VIOLATIONS AFTER RESET) **************/
+function getCountRow_(countsSh, studentId) {
+  ensureCountsHeader_(countsSh);
+
+  const lastRow = countsSh.getLastRow();
+  if (lastRow < 2) return { row: null, count: 0 };
+
+  // read student_id + count only
+  const values = countsSh.getRange(2, 1, lastRow - 1, 2).getValues();
+  const target = String(studentId).trim();
+
+  for (let i = 0; i < values.length; i++) {
+    if (String(values[i][0]).trim() === target) {
+      return { row: i + 2, count: Number(values[i][1] || 0) };
+    }
   }
-});
+  return { row: null, count: 0 };
+}
 
-lookupBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  lookupAndLog();
-});
+function incrementCount_(studentId) {
+  const countsSh = getSheet_(LOG_SHEET_ID, COUNTS_TAB_NAME);
 
-/************ CAMERA SCANNING ************/
-let stopScanFn = null;
+  const found = getCountRow_(countsSh, studentId);
+  const newCount = (found.count || 0) + 1;
 
-async function startCamera() {
+  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+
+  if (found.row) {
+    countsSh.getRange(found.row, 2).setValue(newCount);
+    countsSh.getRange(found.row, 3).setValue(ts);
+  } else {
+    countsSh.appendRow([String(studentId).trim(), newCount, ts]);
+  }
+
+  return newCount;
+}
+
+/************** THRESHOLDS -> TIER **************/
+function thresholdsCacheKey_() {
+  return `THRESHOLDS_${LOG_SHEET_ID}_${THRESHOLDS_TAB_NAME}`;
+}
+
+function getThresholdsCached_() {
+  const cache = CacheService.getScriptCache();
+  const key = thresholdsCacheKey_();
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
+  const sh = getSheet_(LOG_SHEET_ID, THRESHOLDS_TAB_NAME);
+  const vals = sh.getDataRange().getValues();
+  if (vals.length < 2) return [];
+
+  const headers = vals[0].map(h => String(h).trim().toLowerCase());
+  const minI = headers.indexOf("min");
+  const maxI = headers.indexOf("max");
+  const rI = headers.indexOf("r");
+  const gI = headers.indexOf("g");
+  const bI = headers.indexOf("b");
+  const titleI = headers.indexOf("title");
+
+  const tiers = [];
+  for (let i = 1; i < vals.length; i++) {
+    const row = vals[i];
+    const min = Number(row[minI] ?? 0);
+    const max = Number(row[maxI] ?? 999999);
+
+    if (isNaN(min) || isNaN(max)) continue;
+
+    const r = Number(row[rI] ?? 0);
+    const g = Number(row[gI] ?? 0);
+    const b = Number(row[bI] ?? 0);
+    const title = titleI !== -1 ? String(row[titleI] ?? "") : "";
+
+    tiers.push({
+      min,
+      max,
+      label: title,
+      color: `rgb(${r},${g},${b})`
+    });
+  }
+
+  cache.put(key, JSON.stringify(tiers), 300); // 5 min
+  return tiers;
+}
+
+function tierForCount_(count) {
+  const tiers = getThresholdsCached_();
+  for (const t of tiers) {
+    if (count >= t.min && count <= t.max) return t;
+  }
+  return { min: 0, max: 999999, label: "", color: "" };
+}
+
+/************** ROUTES **************/
+function doGet(e) {
   try {
-    if (!scannerWrap || !videoEl) {
-      setStatus("Camera UI missing in HTML (scanner/video).");
-      return;
+    requireKey_(e?.parameter?.school_key);
+    const action = String(e?.parameter?.action || "").toLowerCase();
+
+    if (action === "ping") {
+      return jsonOut({ ok: true, msg: "pong", key_len: String(SCHOOL_KEY).length, app: APP_NAME });
     }
 
-    scannerWrap.style.display = "block";
-    setStatus("Opening camera...");
+    if (action === "getstudent") {
+      const sid = e?.parameter?.student_id || "";
+      const st = findStudentById_(sid);
+      return jsonOut({ ok: true, ...st, app: APP_NAME });
+    }
 
-    const reader = new BrowserMultiFormatReader();
-
-    const controls = await reader.decodeFromConstraints(
-      { video: { facingMode: "environment" } },
-      videoEl,
-      (result) => {
-        if (result) {
-          const text = result.getText();
-          if (studentIdEl) studentIdEl.value = text;
-          stopCamera();
-          lookupAndLog();
-        }
-      }
-    );
-
-    stopScanFn = () => {
-      try { controls.stop(); } catch (_) {}
-    };
-
-    setStatus("Scanning...");
+    return jsonOut({ ok: false, error: "Unknown action (GET). Use action=ping or action=getStudent" });
   } catch (err) {
-    setStatus("Camera error: " + String(err?.message || err));
-    stopCamera();
+    return jsonOut({ ok: false, error: String(err) });
   }
 }
 
-function stopCamera() {
-  if (stopScanFn) stopScanFn();
-  stopScanFn = null;
+function doPost(e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
 
-  if (scannerWrap) scannerWrap.style.display = "none";
+  try {
+    const action = String(e?.parameter?.action || "").toLowerCase();
+    const body = e?.postData?.contents ? JSON.parse(e.postData.contents) : {};
+
+    requireKey_(body.school_key);
+
+    if (action === "logscan") {
+      const sid = String(body.student_id || "").trim();
+      const device = String(body.device_name || "").trim(); // kept for future, not stored in log format
+      if (!sid) return jsonOut({ ok: false, error: "Missing student_id" });
+
+      const st = findStudentById_(sid);
+      if (!st.found) return jsonOut({ ok: true, found: false });
+
+      // increment "violations after reset"
+      const newCount = incrementCount_(sid);
+      const tier = tierForCount_(newCount);
+
+      // append log row in your required format
+      const logSh = getSheet_(LOG_SHEET_ID, LOG_TAB_NAME);
+      ensureLogHeader_(logSh);
+
+      const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      const gradeInt = st.grade === "" ? "" : Number(st.grade);
+
+      logSh.appendRow([
+        ts,
+        sid,
+        st.name,
+        gradeInt,
+        st.team,
+        newCount,
+        st.parent_email
+      ]);
+
+      return jsonOut({
+        ok: true,
+        found: true,
+        student: st,
+        total_count: newCount,
+        tier,
+        app: APP_NAME
+      });
+    }
+
+    return jsonOut({ ok: false, error: "Unknown action (POST). Use action=logScan" });
+  } catch (err) {
+    return jsonOut({ ok: false, error: String(err) });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
-scanBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  startCamera();
-});
-
-closeBtn?.addEventListener("click", (e) => {
-  e.preventDefault();
-  stopCamera();
-});
+/************** OPTIONAL: RUN ONCE IN SCRIPT EDITOR TO AUTHORIZE **************/
+function testAccess() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  Logger.log("Access OK. Sheet name: " + ss.getName());
+}
