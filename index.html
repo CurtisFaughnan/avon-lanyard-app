@@ -5,12 +5,40 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Lanyard App</title>
 
-  
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; }
+    #title { margin: 0 0 12px 0; }
+    .wrap { max-width: 420px; }
+    input, button { border-radius: 10px; border: 1px solid #bbb; }
+    button { background: #f2f2f2; cursor: pointer; }
+    button:active { transform: translateY(1px); }
+    .card {
+      margin-top: 18px;
+      border: 2px solid #ccc;
+      padding: 14px;
+      border-radius: 12px;
+      transition: box-shadow .2s ease, border-color .2s ease;
+    }
+    .tierRow {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .tierBadge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 2px solid #ccc;
+      font-weight: bold;
+      font-size: 14px;
+    }
+  </style>
 </head>
 <body>
   <h2 id="title">Loading...</h2>
 
-  <div style="max-width:420px;">
+  <div class="wrap">
     <input id="studentId" placeholder="Scan or enter Student ID" style="width:100%; font-size:20px; padding:14px;" />
     <button id="lookupBtn" style="width:100%; font-size:22px; padding:16px; margin-top:10px;">Submit</button>
     <button id="scanBtn" style="width:100%; font-size:22px; padding:16px; margin-top:10px;">Scan with Camera</button>
@@ -19,13 +47,18 @@
       Email Home
     </button>
 
-    <p id="status" style="margin-top:12px; font-family:Arial;"></p>
+    <p id="status" style="margin-top:12px;"></p>
 
-    <div style="margin-top:18px; border:1px solid #ccc; padding:14px; border-radius:12px;">
+    <!-- RESULTS CARD (this will get the colored border/glow) -->
+    <div id="resultCard" class="card">
       <div><b>Name:</b> <span id="name">-</span></div>
       <div><b>Class Year:</b> <span id="year">-</span></div>
       <div><b>Team:</b> <span id="team">-</span></div>
-      <div style="margin-top:10px;"><b>Total:</b> <span id="count">-</span></div>
+
+      <div class="tierRow">
+        <div><b>Total:</b> <span id="count">-</span></div>
+        <div class="tierBadge" id="tier">-</div>
+      </div>
     </div>
   </div>
 
@@ -40,11 +73,3 @@
   <script type="module" src="./scanner_v1.js?v=1000"></script>
 </body>
 </html>
-
-
-
-
-
-
-
-
