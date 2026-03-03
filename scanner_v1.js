@@ -146,15 +146,13 @@ let track = null;
 function buildReader() {
   const hints = new Map();
 
-  // Your badge is 14 digits: commonly ITF/ITF-14; sometimes CODE_128
+  // Your example is 14 digits -> commonly ITF/ITF-14 OR CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
     BarcodeFormat.ITF,
     BarcodeFormat.CODE_128,
-    // backups:
+    // light backups:
     BarcodeFormat.EAN_13,
     BarcodeFormat.UPC_A,
-    BarcodeFormat.CODABAR,
-    BarcodeFormat.CODE_39,
   ]);
 
   hints.set(DecodeHintType.TRY_HARDER, true);
@@ -166,28 +164,32 @@ function buildReader() {
 }
 
 function hardStopCamera() {
-  // Stop ZXing controls
   try { controls?.stop(); } catch (_) {}
   controls = null;
 
-  // Stop any tracks on the current video stream
   try {
     const s = videoEl?.srcObject;
     s?.getTracks?.().forEach((t) => t.stop());
   } catch (_) {}
 
-  // Stop last-known track (extra safety)
   try { track?.stop(); } catch (_) {}
   track = null;
 
-  // Detach stream so iOS fully releases the camera
   try { if (videoEl) videoEl.srcObject = null; } catch (_) {}
+}
+
+async function trySetZoom(z) {
+  try {
+    if (!track) return;
+    const caps = track.getCapabilities?.();
+    if (!caps?.zoom) return;
+    const zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, z));
+    await track.applyConstraints({ advanced: [{ zoom }] });
+  } catch (_) {}
 }
 
 async function startCamera() {
   setStatus("Opening camera…");
-
-  // Always release anything leftover first (prevents “camera in use”)
   hardStopCamera();
 
   if (videoEl) {
@@ -201,13 +203,14 @@ async function startCamera() {
 
   const reader = buildReader();
 
-  // Force rear camera + high res via constraints (no device enumeration)
+  // Prefer back camera. If iOS can’t satisfy “environment”, it’ll still pick a camera.
   const constraints = {
     video: {
       facingMode: { ideal: "environment" },
       width: { ideal: 1920 },
       height: { ideal: 1080 },
     },
+    audio: false,
   };
 
   try {
@@ -218,13 +221,14 @@ async function startCamera() {
       handleId(String(text).trim(), "camera");
     });
 
-    // Track reference for cleanup reliability
     try {
       const s = videoEl?.srcObject;
       track = s?.getVideoTracks?.()[0] || null;
     } catch (_) {}
 
-    // iOS sometimes needs this
+    // modest zoom helps barcodes on phones (if supported)
+    await trySetZoom(1.5);
+
     try { await videoEl.play(); } catch (_) {}
 
     setStatus("Camera ready — scan the barcode.");
@@ -242,7 +246,6 @@ function stopCamera() {
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
-// Release camera if tab goes to background
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hardStopCamera();
 });
