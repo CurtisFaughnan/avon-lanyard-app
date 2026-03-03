@@ -140,98 +140,133 @@ studentIdEl?.addEventListener("keydown", (e) => {
 });
 
 /************ CAMERA ************/
-let controls = null;
-let track = null;
+let controls = null; // ZXing controls
+let stream = null;
 
-function buildReader() {
-  const hints = new Map();
-
-  // Your example is 14 digits -> commonly ITF/ITF-14 OR CODE_128
-  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-    BarcodeFormat.ITF,
-    BarcodeFormat.CODE_128,
-    // light backups:
-    BarcodeFormat.EAN_13,
-    BarcodeFormat.UPC_A,
-  ]);
-
-  hints.set(DecodeHintType.TRY_HARDER, true);
-
-  return new BrowserMultiFormatReader(hints, {
-    delayBetweenScanAttempts: 20,
-    delayBetweenScanSuccess: 250,
-  });
-}
+let detector = null; // BarcodeDetector
+let detectRAF = 0;
+let detectBusy = false;
 
 function hardStopCamera() {
+  // Stop BarcodeDetector loop
+  try { cancelAnimationFrame(detectRAF); } catch (_) {}
+  detectRAF = 0;
+  detectBusy = false;
+
+  // Stop ZXing
   try { controls?.stop(); } catch (_) {}
   controls = null;
 
-  try {
-    const s = videoEl?.srcObject;
-    s?.getTracks?.().forEach((t) => t.stop());
-  } catch (_) {}
+  // Stop tracks
+  try { stream?.getTracks?.().forEach((t) => t.stop()); } catch (_) {}
+  stream = null;
 
-  try { track?.stop(); } catch (_) {}
-  track = null;
-
+  // Detach
   try { if (videoEl) videoEl.srcObject = null; } catch (_) {}
 }
 
-async function trySetZoom(z) {
-  try {
-    if (!track) return;
-    const caps = track.getCapabilities?.();
-    if (!caps?.zoom) return;
-    const zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, z));
-    await track.applyConstraints({ advanced: [{ zoom }] });
-  } catch (_) {}
+function setupVideoEl() {
+  if (!videoEl) return;
+  videoEl.setAttribute("playsinline", "");
+  videoEl.muted = true;
+  videoEl.autoplay = true;
+  videoEl.style.width = "100%";
+  videoEl.style.height = "100%";
+  videoEl.style.objectFit = "cover";
 }
 
 async function startCamera() {
   setStatus("Opening camera…");
   hardStopCamera();
-
-  if (videoEl) {
-    videoEl.setAttribute("playsinline", "");
-    videoEl.muted = true;
-    videoEl.autoplay = true;
-    videoEl.style.width = "100%";
-    videoEl.style.height = "100%";
-    videoEl.style.objectFit = "cover";
-  }
-
-  const reader = buildReader();
-
-  // Prefer back camera. If iOS can’t satisfy “environment”, it’ll still pick a camera.
-  const constraints = {
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1920 },
-      height: { ideal: 1080 },
-    },
-    audio: false,
-  };
+  setupVideoEl();
 
   try {
-    controls = await reader.decodeFromConstraints(constraints, videoEl, (result) => {
-      if (!result) return;
-      const text = result.getText?.();
-      if (!text) return;
-      handleId(String(text).trim(), "camera");
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
+      audio: false,
     });
 
-    try {
-      const s = videoEl?.srcObject;
-      track = s?.getVideoTracks?.()[0] || null;
-    } catch (_) {}
-
-    // modest zoom helps barcodes on phones (if supported)
-    await trySetZoom(1.5);
-
+    videoEl.srcObject = stream;
     try { await videoEl.play(); } catch (_) {}
 
-    setStatus("Camera ready — scan the barcode.");
+    // ✅ Prefer native BarcodeDetector (best on iPhone)
+    if ("BarcodeDetector" in window) {
+      // Most important formats for your badge:
+      // ITF / CODE_128 are the big ones.
+      detector = new BarcodeDetector({
+        formats: ["itf", "code_128", "ean_13", "upc_a", "codabar", "code_39"],
+      });
+
+      setStatus("Detecting barcode…");
+
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+
+      const loop = async () => {
+        detectRAF = requestAnimationFrame(loop);
+        if (detectBusy) return;
+        if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+
+        detectBusy = true;
+        try {
+          canvas.width = videoEl.videoWidth;
+          canvas.height = videoEl.videoHeight;
+          ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+
+          const results = await detector.detect(canvas);
+          if (results && results.length) {
+            const raw = results[0].rawValue || results[0].data || "";
+            const text = String(raw).trim();
+            if (text) handleId(text, "camera");
+          }
+        } catch (_) {
+          // ignore per-frame errors
+        } finally {
+          detectBusy = false;
+        }
+      };
+
+      loop();
+      return;
+    }
+
+    // ✅ Fallback: ZXing
+    const hints = new Map();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.ITF,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.CODABAR,
+      BarcodeFormat.CODE_39,
+    ]);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+
+    const reader = new BrowserMultiFormatReader(hints, {
+      delayBetweenScanAttempts: 20,
+      delayBetweenScanSuccess: 250,
+    });
+
+    setStatus("Detecting barcode…");
+    controls = await reader.decodeFromConstraints(
+      {
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+      },
+      videoEl,
+      (result) => {
+        if (!result) return;
+        const text = result.getText?.();
+        if (text) handleId(String(text).trim(), "camera");
+      }
+    );
   } catch (e) {
     setStatus("Camera error: " + (e?.message || String(e)));
     hardStopCamera();
