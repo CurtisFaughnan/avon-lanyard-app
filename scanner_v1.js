@@ -139,18 +139,19 @@ studentIdEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleId(studentIdEl?.value, "enter");
 });
 
-/************ CAMERA (OWN THE STREAM TO AVOID “IN USE”) ************/
-let reader = null;
-let stream = null;
-let stopDecodeFn = null;
+/************ CAMERA ************/
+let controls = null;
+let track = null;
 
 function buildReader() {
   const hints = new Map();
 
-  // 14-digit numeric badge -> usually ITF/ITF-14, sometimes CODE_128
+  // 14-digit numeric badge -> commonly ITF/ITF-14, sometimes CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
     BarcodeFormat.ITF,
     BarcodeFormat.CODE_128,
+
+    // harmless backups
     BarcodeFormat.EAN_13,
     BarcodeFormat.UPC_A,
     BarcodeFormat.CODABAR,
@@ -166,58 +167,78 @@ function buildReader() {
 }
 
 function hardStopCamera() {
-  // Stop decode loop
-  try { stopDecodeFn?.(); } catch (_) {}
-  stopDecodeFn = null;
+  // Stop ZXing
+  try { controls?.stop(); } catch (_) {}
+  controls = null;
 
-  // Stop tracks
+  // Stop any active tracks on video element
   try {
-    stream?.getTracks?.().forEach((t) => t.stop());
+    const s = videoEl?.srcObject;
+    s?.getTracks?.().forEach((t) => t.stop());
   } catch (_) {}
-  stream = null;
 
-  // Clear video element
+  // Stop last known track too (extra safety)
+  try { track?.stop(); } catch (_) {}
+  track = null;
+
+  // Detach stream
   try {
     if (videoEl) videoEl.srcObject = null;
   } catch (_) {}
 }
 
+async function pickBackCameraDeviceId(reader) {
+  const devices = await reader.listVideoInputDevices();
+  const byLabel =
+    devices.find((d) => /back|rear|environment/i.test(d.label || "")) ||
+    devices[devices.length - 1] ||
+    devices[0];
+  return byLabel?.deviceId;
+}
+
 async function startCamera() {
   setStatus("Opening camera…");
 
-  // Always stop anything leftover first (prevents “camera in use”)
+  // Always release anything leftover first (prevents “camera in use”)
   hardStopCamera();
 
-  if (!reader) reader = buildReader();
+  if (videoEl) {
+    videoEl.setAttribute("playsinline", "");
+    videoEl.muted = true;
+    videoEl.autoplay = true;
+    videoEl.style.width = "100%";
+    videoEl.style.height = "100%";
+    videoEl.style.objectFit = "cover";
+  }
+
+  const reader = buildReader();
 
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
+    // Force permission prompt first (labels usually become available after this)
+    const permStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" } },
       audio: false,
     });
+    permStream.getTracks().forEach((t) => t.stop());
 
-    if (videoEl) {
-      videoEl.setAttribute("playsinline", "");
-      videoEl.muted = true;
-      videoEl.autoplay = true;
-      videoEl.srcObject = stream;
-      videoEl.style.width = "100%";
-      videoEl.style.height = "100%";
-      videoEl.style.objectFit = "cover";
-      try { await videoEl.play(); } catch (_) {}
-    }
+    const deviceId = await pickBackCameraDeviceId(reader);
 
-    // Decode from the *existing* video element/stream
-    stopDecodeFn = reader.decodeFromVideoElementContinuously(videoEl, (result, err) => {
-      if (result) {
-        const text = result.getText?.();
-        if (text) handleId(String(text).trim(), "camera");
-      }
+    // ✅ Supported method on @zxing/browser@0.1.5
+    controls = await reader.decodeFromVideoDevice(deviceId, videoEl, (result) => {
+      if (!result) return;
+      const text = result.getText?.();
+      if (!text) return;
+      handleId(String(text).trim(), "camera");
     });
+
+    // Grab track (for cleanup reliability)
+    try {
+      const s = videoEl?.srcObject;
+      track = s?.getVideoTracks?.()[0] || null;
+    } catch (_) {}
+
+    // iOS sometimes needs this
+    try { await videoEl.play(); } catch (_) {}
 
     setStatus("Camera ready — scan the barcode.");
   } catch (e) {
@@ -234,7 +255,7 @@ function stopCamera() {
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
-// If user background/locks phone, release camera
+// If user backgrounds the tab, release camera
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hardStopCamera();
 });
