@@ -15,7 +15,7 @@ const EMAIL_SUBJECT   = "Student Notification";
 const SCHOOL_KEY = "AVON-LANYARD-2026-SECURE";
 
 // Password required to send Email Home (change this)
-const EMAIL_HOME_PASSWORD = "CHANGE-ME-EMAIL-PASS";
+const EMAIL_HOME_PASSWORD = "Avon_North";
 
 /************** AUTH **************/
 function requireKey_(provided) {
@@ -323,4 +323,5 @@ function doPost(e) {
     return jsonOut({ ok: false, error: String(err) });
   }
 }
+
 
