@@ -1,4 +1,4 @@
-import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm";
+import { BrowserMultiFormatReader } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
 
 const cfg = window.APP_CONFIG;
 
@@ -7,48 +7,72 @@ const titleEl = document.getElementById("title");
 const studentIdEl = document.getElementById("studentId");
 const lookupBtn = document.getElementById("lookupBtn");
 const scanBtn = document.getElementById("scanBtn");
-const statusEl = document.getElementById("status");
 
 const nameEl = document.getElementById("name");
 const yearEl = document.getElementById("year");
 const teamEl = document.getElementById("team");
 const countEl = document.getElementById("count");
+const statusEl = document.getElementById("status");
 
 const scannerWrap = document.getElementById("scanner");
 const videoEl = document.getElementById("video");
 const closeBtn = document.getElementById("closeScan");
 
-// If your HTML still has emailBtn, hide it (portal mode)
-const emailBtn = document.getElementById("emailBtn");
-if (emailBtn) emailBtn.style.display = "none";
+// the box that shows name/year/team/total
+const infoBox = nameEl?.closest("div")?.parentElement; // your bordered card
 
 /************ INIT ************/
 if (titleEl) titleEl.textContent = cfg?.appLabel || "Scanner App";
-setStatus("Ready.");
+setStatus("Loading…");
 
+// warm up Apps Script to reduce first-scan slowness
+warmUp().catch(() => {});
+
+/************ HELPERS ************/
 function setStatus(msg) {
   if (statusEl) statusEl.textContent = msg || "";
 }
 
-function clearStudentCard() {
-  if (nameEl) nameEl.textContent = "-";
-  if (yearEl) yearEl.textContent = "-";
-  if (teamEl) teamEl.textContent = "-";
-  if (countEl) countEl.textContent = "-";
+function setTierColor(colorCss) {
+  if (!infoBox) return;
+  if (!colorCss) {
+    infoBox.style.boxShadow = "";
+    infoBox.style.border = "1px solid #ccc";
+    return;
+  }
+  infoBox.style.border = `2px solid ${colorCss}`;
+  infoBox.style.boxShadow = `0 0 0 4px ${colorCss}33`; // faint glow
 }
 
-/************ API ************/
-// ✅ SPEED: ONE CALL ONLY (logScan returns student + count + tier)
-async function apiLogScan(studentId) {
-  const url = new URL(cfg.apiUrl);
-  url.searchParams.set("action", "logScan");
+function beep() {
+  // tiny beep using WebAudio (works on most phones after user interaction)
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = "sine";
+    o.frequency.value = 880;
+    g.gain.value = 0.04;
+    o.start();
+    setTimeout(() => { o.stop(); ctx.close(); }, 80);
+  } catch (_) {}
+}
 
-  const payload = {
-    school_key: cfg.schoolKey,
-    student_id: String(studentId || "").trim(),
-    device_name: navigator.userAgent,
-    ts: new Date().toISOString()
-  };
+async function apiGet(action, params) {
+  const url = new URL(cfg.apiUrl);
+  url.searchParams.set("action", action);
+  url.searchParams.set("school_key", cfg.schoolKey);
+  Object.entries(params || {}).forEach(([k, v]) => url.searchParams.set(k, v));
+  const res = await fetch(url.toString(), { method: "GET", cache: "no-store" });
+  return await res.json();
+}
+
+async function apiPost(action, body) {
+  const url = new URL(cfg.apiUrl);
+  url.searchParams.set("action", action);
+
+  const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
   const res = await fetch(url.toString(), {
     method: "POST",
@@ -59,80 +83,114 @@ async function apiLogScan(studentId) {
   return await res.json();
 }
 
-/************ SUBMIT ************/
-async function submitScan() {
+async function warmUp() {
+  // only to reduce the "first request is slow" feeling
+  const r = await apiGet("ping");
+  if (r?.ok) setStatus("Ready.");
+}
+
+/************ LOOKUP + LOG ************/
+async function lookupAndLog() {
   try {
     const sid = (studentIdEl?.value || "").trim();
     if (!sid) return setStatus("Enter a student ID.");
 
-    setStatus("Logging...");
-    const r = await apiLogScan(sid);
+    setStatus("Looking up…");
 
-    if (!r.ok) return setStatus("Error: " + (r.error || "unknown"));
+    const student = await apiGet("getStudent", { student_id: sid });
 
-    if (!r.found) {
-      clearStudentCard();
-      return setStatus("Student not found.");
+    if (!student.ok) return setStatus("Lookup error: " + (student.error || "unknown"));
+
+    if (!student.found) {
+      setStatus("Student not found.");
+      nameEl.textContent = "-";
+      yearEl.textContent = "-";
+      teamEl.textContent = "-";
+      countEl.textContent = "-";
+      setTierColor("");
+      return;
     }
 
-    // logScan returns student + count
-    const st = r.student || {};
-    if (nameEl) nameEl.textContent = st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
-    if (yearEl) yearEl.textContent = st.grade ?? st.class_year ?? "-";
-    if (teamEl) teamEl.textContent = st.team ?? "-";
-    if (countEl) countEl.textContent = String(r.total_count ?? "-");
+    nameEl.textContent = student.name || `${student.first_name || ""} ${student.last_name || ""}`.trim();
+    yearEl.textContent = (student.grade ?? student.class_year ?? "-");
+    teamEl.textContent = student.team || "-";
 
-    // Optional tier UI (if your Code.gs returns tier)
-    if (r.tier && r.tier.color) {
-      // tint the status line or the card border
-      statusEl.style.fontWeight = "bold";
-      statusEl.style.color = r.tier.color;
-      setStatus(`Logged. Tier: ${r.tier.label || ""}`.trim());
-    } else {
-      statusEl.style.color = "";
-      setStatus("Logged.");
-    }
+    setStatus("Logging…");
+
+    const logRes = await apiPost("logScan", {
+      student_id: sid,
+      device_name: navigator.userAgent
+    });
+
+    if (!logRes.ok) return setStatus("Log error: " + (logRes.error || "unknown"));
+    if (!logRes.found) return setStatus("Student not found (log).");
+
+    countEl.textContent = String(logRes.total_count ?? "-");
+
+    // tier color from Thresholds tab
+    const tier = logRes.tier || {};
+    setTierColor(tier.color || "");
+
+    setStatus(tier.label ? `Logged (${tier.label}).` : "Logged.");
   } catch (err) {
     setStatus("App error: " + String(err));
   }
 }
 
-lookupBtn?.addEventListener("click", submitScan);
+/************ BUTTON EVENTS ************/
+lookupBtn?.addEventListener("click", lookupAndLog);
 studentIdEl?.addEventListener("keydown", (e) => {
-  if (e.key === "Enter") submitScan();
+  if (e.key === "Enter") lookupAndLog();
 });
 
-/************ CAMERA SCAN ************/
-const reader = new BrowserMultiFormatReader();
-let controls = null;
+/************ CAMERA SCANNING ************/
+let stopFn = null;
 
 async function startCamera() {
   try {
-    if (!scannerWrap || !videoEl) return setStatus("Camera UI not found.");
-
     scannerWrap.style.display = "block";
-    setStatus("Opening camera...");
+    setStatus("Opening camera…");
 
-    // Pick back camera if possible
-    const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-    let deviceId = null;
+    const reader = new BrowserMultiFormatReader();
 
-    if (devices && devices.length) {
-      const back = devices.find(d => /back|rear|environment/i.test(d.label));
-      deviceId = (back || devices[0]).deviceId;
-    }
-
-    // decodeFromVideoDevice is most reliable on phones
-    controls = await reader.decodeFromVideoDevice(deviceId, videoEl, (result, err) => {
-      if (result) {
-        const text = result.getText();
-        studentIdEl.value = text;
-        stopCamera();
-        submitScan();
+    // better constraints for phones
+    const constraints = {
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1280 },
+        height: { ideal: 720 }
       }
-    });
+    };
 
-    setStatus("Point at barcode...");
+    const controls = await reader.decodeFromConstraints(
+      constraints,
+      videoEl,
+      (result) => {
+        if (!result) return;
+        const text = result.getText ? result.getText() : String(result);
+        if (!text) return;
+
+        // SUCCESS
+        beep();
+        studentIdEl.value = text.trim();
+        stopCamera();
+        lookupAndLog();
+      }
+    );
+
+    // Try to apply zoom if supported (helps a lot on barcodes)
+    try {
+      const stream = videoEl.srcObject;
+      const track = stream?.getVideoTracks?.()[0];
+      const caps = track?.getCapabilities?.();
+      if (caps?.zoom) {
+        const z = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
+        await track.applyConstraints({ advanced: [{ zoom: z }] });
+      }
+    } catch (_) {}
+
+    stopFn = () => controls.stop();
+    setStatus("Scanning… (aim at barcode lines)");
   } catch (err) {
     setStatus("Camera error: " + String(err));
     stopCamera();
@@ -140,11 +198,9 @@ async function startCamera() {
 }
 
 function stopCamera() {
-  try {
-    if (controls) controls.stop();
-  } catch (_) {}
-  controls = null;
-  if (scannerWrap) scannerWrap.style.display = "none";
+  try { if (stopFn) stopFn(); } catch (_) {}
+  stopFn = null;
+  scannerWrap.style.display = "none";
 }
 
 scanBtn?.addEventListener("click", startCamera);
