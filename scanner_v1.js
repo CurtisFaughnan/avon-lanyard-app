@@ -51,7 +51,6 @@ async function apiPost(action, body) {
 
   const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
-  // text/plain avoids CORS preflight in many browsers (good for iOS Safari)
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -71,7 +70,6 @@ async function processScan(id, source) {
   const sid = String(id || "").trim();
   if (!sid) return;
 
-  // De-dupe repeated camera fires
   const now = Date.now();
   if (sid === lastScanned && now - lastScanAt < 1500) return;
   lastScanned = sid;
@@ -80,7 +78,6 @@ async function processScan(id, source) {
   if (studentIdEl) studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // ✅ ONE CALL: Code.gs logScan returns student + total_count + tier
   const logRes = await apiPost("logScan", {
     student_id: sid,
     device_name: navigator.userAgent,
@@ -130,7 +127,6 @@ async function handleId(sid, source = "manual") {
     processing = false;
   }
 
-  // If another scan came in while logging, process it next
   if (queuedId) {
     const next = queuedId;
     queuedId = null;
@@ -143,18 +139,18 @@ studentIdEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleId(studentIdEl?.value, "enter");
 });
 
-/************ CAMERA ************/
-let controls = null;
+/************ CAMERA (OWN THE STREAM TO AVOID “IN USE”) ************/
+let reader = null;
+let stream = null;
+let stopDecodeFn = null;
 
 function buildReader() {
   const hints = new Map();
 
-  // Your badge: 14-digit numeric -> commonly ITF / ITF-14
+  // 14-digit numeric badge -> usually ITF/ITF-14, sometimes CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
     BarcodeFormat.ITF,
     BarcodeFormat.CODE_128,
-
-    // harmless backups (won’t slow much)
     BarcodeFormat.EAN_13,
     BarcodeFormat.UPC_A,
     BarcodeFormat.CODABAR,
@@ -169,80 +165,82 @@ function buildReader() {
   });
 }
 
-async function pickBackCameraDeviceId(reader) {
-  const devices = await reader.listVideoInputDevices();
+function hardStopCamera() {
+  // Stop decode loop
+  try { stopDecodeFn?.(); } catch (_) {}
+  stopDecodeFn = null;
 
-  // On iOS, labels show up after the user grants camera permission
-  const byLabel =
-    devices.find((d) => /back|rear|environment/i.test(d.label || "")) ||
-    devices[devices.length - 1] ||
-    devices[0];
+  // Stop tracks
+  try {
+    stream?.getTracks?.().forEach((t) => t.stop());
+  } catch (_) {}
+  stream = null;
 
-  return byLabel?.deviceId;
+  // Clear video element
+  try {
+    if (videoEl) videoEl.srcObject = null;
+  } catch (_) {}
 }
 
 async function startCamera() {
-  if (controls) return;
-
   setStatus("Opening camera…");
 
-  if (videoEl) {
-    // iOS Safari needs this to avoid fullscreen video
-    videoEl.setAttribute("playsinline", "");
-    videoEl.muted = true;
-    videoEl.autoplay = true;
-    videoEl.style.width = "100%";
-    videoEl.style.height = "100%";
-    videoEl.style.objectFit = "cover";
-  }
+  // Always stop anything leftover first (prevents “camera in use”)
+  hardStopCamera();
 
-  const reader = buildReader();
+  if (!reader) reader = buildReader();
 
   try {
-    // Force permission prompt so device labels become available
-    await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: "environment" },
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+      },
       audio: false,
     });
 
-    const deviceId = await pickBackCameraDeviceId(reader);
+    if (videoEl) {
+      videoEl.setAttribute("playsinline", "");
+      videoEl.muted = true;
+      videoEl.autoplay = true;
+      videoEl.srcObject = stream;
+      videoEl.style.width = "100%";
+      videoEl.style.height = "100%";
+      videoEl.style.objectFit = "cover";
+      try { await videoEl.play(); } catch (_) {}
+    }
 
-    // ✅ More reliable on iOS: decodeFromVideoDevice with explicit deviceId
-    controls = await reader.decodeFromVideoDevice(deviceId, videoEl, (result) => {
-      if (!result) return;
-      const text = result.getText?.();
-      if (!text) return;
-      handleId(String(text).trim(), "camera");
+    // Decode from the *existing* video element/stream
+    stopDecodeFn = reader.decodeFromVideoElementContinuously(videoEl, (result, err) => {
+      if (result) {
+        const text = result.getText?.();
+        if (text) handleId(String(text).trim(), "camera");
+      }
     });
-
-    // Some iPhones need a play() nudge
-    try {
-      await videoEl?.play?.();
-    } catch (_) {}
 
     setStatus("Camera ready — scan the barcode.");
   } catch (e) {
-    setStatus("Camera error: " + String(e));
-    stopCamera();
+    setStatus("Camera error: " + (e?.message || String(e)));
+    hardStopCamera();
   }
 }
 
 function stopCamera() {
-  try {
-    controls?.stop();
-  } catch (_) {}
-  controls = null;
-
+  hardStopCamera();
   setStatus("Camera stopped.");
 }
 
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
+// If user background/locks phone, release camera
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) hardStopCamera();
+});
+
 /************ WARM-UP ************/
 (async () => {
-  try {
-    await apiGet("ping");
-  } catch (_) {}
+  try { await apiGet("ping"); } catch (_) {}
   setStatus("Ready.");
 })();
