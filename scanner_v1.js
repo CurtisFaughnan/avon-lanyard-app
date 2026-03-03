@@ -1,8 +1,9 @@
+// ✅ FIX: DecodeHintType is from @zxing/library, not @zxing/browser
+import { BrowserMultiFormatReader } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
 import {
-  BrowserMultiFormatReader,
   BarcodeFormat,
   DecodeHintType,
-} from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
+} from "https://cdn.skypack.dev/@zxing/library@0.21.3";
 
 const cfg = window.APP_CONFIG;
 
@@ -39,11 +40,11 @@ function setTierColor(colorCss) {
 }
 
 /**
- * Your index.html already has #guide and #guideLabel.
- * Don’t add/force a fullscreen overlay; keep your layout stable.
+ * Keep your existing guide elements (index.html has them),
+ * and don’t force a fullscreen overlay here.
  */
 function ensureScanOverlay() {
-  if (document.getElementById("guide")) return; // already provided by HTML
+  // no-op: your HTML already shows the “Place barcode…” box
 }
 
 /************ API ************/
@@ -92,7 +93,7 @@ async function processScan(id, source) {
   studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // ✅ ONE CALL ONLY: logScan already returns student + total_count + tier
+  // ✅ ONE CALL ONLY: backend logScan returns student + total_count + tier
   const logRes = await apiPost("logScan", {
     student_id: sid,
     device_name: navigator.userAgent,
@@ -161,17 +162,16 @@ let track = null;
 function buildReader() {
   const hints = new Map();
 
-  // ✅ Big fix: don’t lock to only CODE_128.
-  // Numeric barcodes are commonly ITF, EAN/UPC, Code39, Codabar, etc.
+  // ✅ Numeric barcodes are often ITF / EAN / UPC / CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-    BarcodeFormat.CODE_128,
     BarcodeFormat.ITF,
     BarcodeFormat.EAN_13,
     BarcodeFormat.EAN_8,
     BarcodeFormat.UPC_A,
     BarcodeFormat.UPC_E,
-    BarcodeFormat.CODE_39,
+    BarcodeFormat.CODE_128,
     BarcodeFormat.CODABAR,
+    BarcodeFormat.CODE_39, // harmless to include; still fast enough
   ]);
 
   hints.set(DecodeHintType.TRY_HARDER, true);
@@ -215,12 +215,10 @@ async function trySetFocusContinuous() {
 }
 
 function ensureTorchButton() {
-  // Put a torch button near top-right (only once)
   if (document.getElementById("torchBtn")) return;
   const wrap = videoEl?.parentElement;
   if (!wrap) return;
 
-  // ensure position for absolute button
   if (!wrap.style.position) wrap.style.position = "relative";
 
   const btn = document.createElement("button");
@@ -258,8 +256,6 @@ async function startCamera() {
     videoEl.setAttribute("playsinline", "");
     videoEl.muted = true;
     videoEl.autoplay = true;
-
-    // Make sure the video is sized and sharp enough
     videoEl.style.width = "100%";
     videoEl.style.height = "100%";
     videoEl.style.objectFit = "cover";
@@ -288,14 +284,11 @@ async function startCamera() {
     const stream = videoEl?.srcObject;
     track = stream?.getVideoTracks?.()[0] || null;
 
-    // Best-effort camera tuning
     await trySetFocusContinuous();
-
-    // iPhone digital zoom can sometimes blur; keep modest.
-    await trySetZoom(1.5);
+    await trySetZoom(1.5); // modest zoom works best on iPhone
 
     ensureTorchButton();
-    setStatus("Camera ready — put barcode inside the box.");
+    setStatus("Camera ready — scan a barcode.");
   } catch (e) {
     setStatus("Camera error: " + String(e));
     stopCamera();
@@ -303,19 +296,13 @@ async function startCamera() {
 }
 
 function stopCamera() {
-  try {
-    controls?.stop();
-  } catch (_) {}
+  try { controls?.stop(); } catch (_) {}
   controls = null;
 
-  try {
-    track?.stop();
-  } catch (_) {}
+  try { track?.stop(); } catch (_) {}
   track = null;
 
-  try {
-    document.getElementById("torchBtn")?.remove();
-  } catch (_) {}
+  try { document.getElementById("torchBtn")?.remove(); } catch (_) {}
 
   setStatus("Camera stopped.");
 }
