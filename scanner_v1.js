@@ -1,5 +1,4 @@
-import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm";
-import { BarcodeFormat, DecodeHintType } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/+esm";
+import { BrowserMultiFormatReader } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
 
 const cfg = window.APP_CONFIG;
 
@@ -15,7 +14,7 @@ const statusEl = document.getElementById("status");
 const videoEl = document.getElementById("video");
 const scanBtn = document.getElementById("scanBtn");
 const stopBtn = document.getElementById("closeScan");
-const cardEl = document.getElementById("card");
+const cardEl = document.getElementById("card"); // optional
 
 /************ INIT ************/
 if (titleEl) titleEl.textContent = cfg?.appLabel || "Lanyard App";
@@ -48,10 +47,9 @@ async function apiGet(action, params) {
 async function apiPost(action, body) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
-
   const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
-  // text/plain avoids CORS preflight in many cases (good for iOS Safari too)
+  // text/plain avoids CORS preflight in many browsers (good for iOS Safari)
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
@@ -61,7 +59,7 @@ async function apiPost(action, body) {
   return await res.json();
 }
 
-/************ MAIN FLOW ************/
+/************ MAIN FLOW (FAST: 1 request) ************/
 let lastScanned = "";
 let lastScanAt = 0;
 let processing = false;
@@ -79,7 +77,7 @@ async function processScan(id, source) {
   studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // ✅ ONE CALL: Code.gs logScan already returns student + totals
+  // ✅ ONE CALL ONLY (backend logScan returns student + total_count + tier)
   const logRes = await apiPost("logScan", {
     student_id: sid,
     device_name: navigator.userAgent,
@@ -144,23 +142,8 @@ let controls = null;
 let track = null;
 
 function buildReader() {
-  const hints = new Map();
-
-  // ✅ Numeric badges are commonly ITF / EAN / UPC / CODE_128
-  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
-    BarcodeFormat.ITF,
-    BarcodeFormat.EAN_13,
-    BarcodeFormat.EAN_8,
-    BarcodeFormat.UPC_A,
-    BarcodeFormat.UPC_E,
-    BarcodeFormat.CODE_128,
-    BarcodeFormat.CODABAR,
-    BarcodeFormat.CODE_39,
-  ]);
-
-  hints.set(DecodeHintType.TRY_HARDER, true);
-
-  return new BrowserMultiFormatReader(hints, {
+  // ✅ No hints = multi-format decoding (fixes “won’t scan” when barcode isn’t CODE_128)
+  return new BrowserMultiFormatReader(undefined, {
     delayBetweenScanAttempts: 30,
     delayBetweenScanSuccess: 250,
   });
@@ -246,8 +229,6 @@ stopBtn?.addEventListener("click", stopCamera);
 
 /************ WARM-UP ************/
 (async () => {
-  try {
-    await apiGet("ping");
-  } catch (_) {}
+  try { await apiGet("ping"); } catch (_) {}
   setStatus("Ready.");
 })();
