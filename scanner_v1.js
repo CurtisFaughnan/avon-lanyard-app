@@ -146,12 +146,11 @@ let track = null;
 function buildReader() {
   const hints = new Map();
 
-  // 14-digit numeric badge -> commonly ITF/ITF-14, sometimes CODE_128
+  // Your badge is 14 digits: commonly ITF/ITF-14; sometimes CODE_128
   hints.set(DecodeHintType.POSSIBLE_FORMATS, [
     BarcodeFormat.ITF,
     BarcodeFormat.CODE_128,
-
-    // harmless backups
+    // backups:
     BarcodeFormat.EAN_13,
     BarcodeFormat.UPC_A,
     BarcodeFormat.CODABAR,
@@ -167,33 +166,22 @@ function buildReader() {
 }
 
 function hardStopCamera() {
-  // Stop ZXing
+  // Stop ZXing controls
   try { controls?.stop(); } catch (_) {}
   controls = null;
 
-  // Stop any active tracks on video element
+  // Stop any tracks on the current video stream
   try {
     const s = videoEl?.srcObject;
     s?.getTracks?.().forEach((t) => t.stop());
   } catch (_) {}
 
-  // Stop last known track too (extra safety)
+  // Stop last-known track (extra safety)
   try { track?.stop(); } catch (_) {}
   track = null;
 
-  // Detach stream
-  try {
-    if (videoEl) videoEl.srcObject = null;
-  } catch (_) {}
-}
-
-async function pickBackCameraDeviceId(reader) {
-  const devices = await reader.listVideoInputDevices();
-  const byLabel =
-    devices.find((d) => /back|rear|environment/i.test(d.label || "")) ||
-    devices[devices.length - 1] ||
-    devices[0];
-  return byLabel?.deviceId;
+  // Detach stream so iOS fully releases the camera
+  try { if (videoEl) videoEl.srcObject = null; } catch (_) {}
 }
 
 async function startCamera() {
@@ -213,25 +201,24 @@ async function startCamera() {
 
   const reader = buildReader();
 
+  // Force rear camera + high res via constraints (no device enumeration)
+  const constraints = {
+    video: {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 },
+    },
+  };
+
   try {
-    // Force permission prompt first (labels usually become available after this)
-    const permStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } },
-      audio: false,
-    });
-    permStream.getTracks().forEach((t) => t.stop());
-
-    const deviceId = await pickBackCameraDeviceId(reader);
-
-    // ✅ Supported method on @zxing/browser@0.1.5
-    controls = await reader.decodeFromVideoDevice(deviceId, videoEl, (result) => {
+    controls = await reader.decodeFromConstraints(constraints, videoEl, (result) => {
       if (!result) return;
       const text = result.getText?.();
       if (!text) return;
       handleId(String(text).trim(), "camera");
     });
 
-    // Grab track (for cleanup reliability)
+    // Track reference for cleanup reliability
     try {
       const s = videoEl?.srcObject;
       track = s?.getVideoTracks?.()[0] || null;
@@ -255,7 +242,7 @@ function stopCamera() {
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
-// If user backgrounds the tab, release camera
+// Release camera if tab goes to background
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) hardStopCamera();
 });
