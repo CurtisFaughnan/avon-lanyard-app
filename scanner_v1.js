@@ -1,6 +1,5 @@
 import { BrowserMultiFormatReader } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/+esm";
 import { BarcodeFormat, DecodeHintType } from "https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/+esm";
-
 const cfg = window.APP_CONFIG;
 
 /************ ELEMENTS ************/
