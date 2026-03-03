@@ -2,10 +2,10 @@
 const ROSTER_SHEET_ID = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
 const ROSTER_TAB_NAME = "Lanyard_Data";
 
-const LOG_SHEET_ID    = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
-const LOG_TAB_NAME    = "lanyard_log";
+const LOG_SHEET_ID = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
+const LOG_TAB_NAME = "lanyard_log";
 
-const COUNTS_TAB_NAME = "Counts";         // created automatically
+const COUNTS_TAB_NAME = "Counts"; // created automatically
 const THRESHOLDS_TAB_NAME = "Thresholds"; // must exist
 
 const APP_NAME = "Lanyard";
@@ -20,9 +20,9 @@ function requireKey_(provided) {
 
 /************** HELPERS **************/
 function jsonOut(obj) {
-  return ContentService
-    .createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(
+    ContentService.MimeType.JSON
+  );
 }
 
 function ts_() {
@@ -33,15 +33,32 @@ function ts_() {
   );
 }
 
+// Cache opens within a single execution (big speed win)
+const _ssCache_ = {};
+function openSs_(spreadsheetId) {
+  if (!_ssCache_[spreadsheetId]) {
+    _ssCache_[spreadsheetId] = SpreadsheetApp.openById(spreadsheetId);
+  }
+  return _ssCache_[spreadsheetId];
+}
+
 function getSheet_(spreadsheetId, tabName) {
-  const ss = SpreadsheetApp.openById(spreadsheetId);
+  const ss = openSs_(spreadsheetId);
   let sh = ss.getSheetByName(tabName);
   if (!sh) sh = ss.insertSheet(tabName);
   return sh;
 }
 
 function ensureLogHeader_(sh) {
-  const desired = ["date", "student_id", "name", "grade", "team", "violations_after_reset", "parent_email"];
+  const desired = [
+    "date",
+    "student_id",
+    "name",
+    "grade",
+    "team",
+    "violations_after_reset",
+    "parent_email",
+  ];
   if (sh.getLastRow() === 0) sh.appendRow(desired);
   return desired;
 }
@@ -61,7 +78,10 @@ function getRosterMeta_() {
 
   const sh = getSheet_(ROSTER_SHEET_ID, ROSTER_TAB_NAME);
   const lastCol = sh.getLastColumn();
-  const header = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h).trim());
+  const header = sh
+    .getRange(1, 1, 1, lastCol)
+    .getValues()[0]
+    .map((h) => String(h).trim());
 
   const meta = {
     lastCol,
@@ -72,10 +92,11 @@ function getRosterMeta_() {
       class_year: header.indexOf("class_year"),
       team: header.indexOf("team"),
       parent_email: header.indexOf("parent_email"),
-    }
+    },
   };
 
-  if (meta.idx.student_id === -1) throw new Error("Roster missing column header: student_id");
+  if (meta.idx.student_id === -1)
+    throw new Error("Roster missing column header: student_id");
 
   cache.put(key, JSON.stringify(meta), 6 * 60 * 60); // 6 hours
   return meta;
@@ -87,8 +108,8 @@ function findStudentById_(studentId) {
 
   const sh = getSheet_(ROSTER_SHEET_ID, ROSTER_TAB_NAME);
   const meta = getRosterMeta_();
-  const sidCol = meta.idx.student_id + 1;
 
+  const sidCol = meta.idx.student_id + 1;
   const lastRow = sh.getLastRow();
   if (lastRow < 2) return { found: false };
 
@@ -96,6 +117,7 @@ function findStudentById_(studentId) {
   const range = sh.getRange(2, sidCol, lastRow - 1, 1);
   const finder = range.createTextFinder(sid).matchEntireCell(true);
   const cell = finder.findNext();
+
   if (!cell) return { found: false };
 
   const rowNum = cell.getRow();
@@ -103,9 +125,9 @@ function findStudentById_(studentId) {
   const i = meta.idx;
 
   const first = i.first_name !== -1 ? String(row[i.first_name] ?? "") : "";
-  const last  = i.last_name  !== -1 ? String(row[i.last_name] ?? "") : "";
+  const last = i.last_name !== -1 ? String(row[i.last_name] ?? "") : "";
   const grade = i.class_year !== -1 ? String(row[i.class_year] ?? "") : "";
-  const team  = i.team       !== -1 ? String(row[i.team] ?? "") : "";
+  const team = i.team !== -1 ? String(row[i.team] ?? "") : "";
   const email = i.parent_email !== -1 ? String(row[i.parent_email] ?? "") : "";
 
   return {
@@ -116,32 +138,33 @@ function findStudentById_(studentId) {
     name: `${first} ${last}`.trim(),
     grade: grade,
     team: team,
-    parent_email: email
+    parent_email: email,
   };
 }
 
-/************** COUNTS (FAST) **************/
+/************** COUNTS (FASTER: TextFinder instead of scanning all rows) **************/
 function getCountRow_(countsSh, sid) {
   ensureCountsHeader_(countsSh);
 
   const lastRow = countsSh.getLastRow();
   if (lastRow < 2) return { row: null, count: 0 };
 
-  // Only read the first 2 columns (student_id, count)
-  const vals = countsSh.getRange(2, 1, lastRow - 1, 2).getValues();
   const target = String(sid).trim();
+  const range = countsSh.getRange(2, 1, lastRow - 1, 1); // student_id column only
+  const finder = range.createTextFinder(target).matchEntireCell(true);
+  const cell = finder.findNext();
 
-  for (let r = 0; r < vals.length; r++) {
-    if (String(vals[r][0]).trim() === target) {
-      return { row: r + 2, count: Number(vals[r][1] || 0) };
-    }
-  }
-  return { row: null, count: 0 };
+  if (!cell) return { row: null, count: 0 };
+
+  const rowNum = cell.getRow();
+  const countVal = Number(countsSh.getRange(rowNum, 2).getValue() || 0);
+  return { row: rowNum, count: countVal };
 }
 
 function incrementCount_(sid) {
   const sh = getSheet_(LOG_SHEET_ID, COUNTS_TAB_NAME);
   const found = getCountRow_(sh, sid);
+
   const newCount = (found.count || 0) + 1;
   const stamp = ts_();
 
@@ -151,6 +174,7 @@ function incrementCount_(sid) {
   } else {
     sh.appendRow([String(sid).trim(), newCount, stamp]);
   }
+
   return newCount;
 }
 
@@ -165,7 +189,7 @@ function getThresholds_() {
   const vals = sh.getDataRange().getValues();
   if (vals.length < 2) return [];
 
-  const headers = vals[0].map(h => String(h).trim().toLowerCase());
+  const headers = vals[0].map((h) => String(h).trim().toLowerCase());
   const minI = headers.indexOf("min");
   const maxI = headers.indexOf("max");
   const rI = headers.indexOf("r");
@@ -187,11 +211,7 @@ function getThresholds_() {
 
     if (!Number.isFinite(min) || !Number.isFinite(max)) continue;
 
-    tiers.push({
-      min, max,
-      label: title,
-      color: `rgb(${r},${g},${b})`
-    });
+    tiers.push({ min, max, label: title, color: `rgb(${r},${g},${b})` });
   }
 
   cache.put(key, JSON.stringify(tiers), 300); // 5 minutes
@@ -210,10 +230,16 @@ function tierForCount_(count) {
 function doGet(e) {
   try {
     requireKey_(e?.parameter?.school_key);
+
     const action = String(e?.parameter?.action || "").toLowerCase();
 
     if (action === "ping") {
-      return jsonOut({ ok: true, msg: "pong", key_len: String(SCHOOL_KEY).length, app: APP_NAME });
+      return jsonOut({
+        ok: true,
+        msg: "pong",
+        key_len: String(SCHOOL_KEY).length,
+        app: APP_NAME,
+      });
     }
 
     if (action === "getstudent") {
@@ -255,16 +281,17 @@ function doPost(e) {
         st.grade === "" ? "" : Number(st.grade),
         st.team,
         newCount,
-        st.parent_email
+        st.parent_email,
       ]);
 
+      // ✅ IMPORTANT: student returned here so frontend can skip getStudent call
       return jsonOut({
         ok: true,
         found: true,
         student: st,
         total_count: newCount,
         tier,
-        app: APP_NAME
+        app: APP_NAME,
       });
     }
 
