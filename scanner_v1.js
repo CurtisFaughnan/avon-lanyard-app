@@ -1,4 +1,8 @@
-import { BrowserMultiFormatReader } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
+import {
+  BrowserMultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType
+} from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
 
 const cfg = window.APP_CONFIG;
 
@@ -19,9 +23,9 @@ const stopBtn = document.getElementById("closeScan");
 
 const cardEl = document.getElementById("card");
 
+/************ INIT ************/
 if (titleEl) titleEl.textContent = cfg?.appLabel || "Scanner App";
 
-/************ HELPERS ************/
 function setStatus(msg) {
   if (statusEl) statusEl.textContent = msg || "";
 }
@@ -61,25 +65,29 @@ async function apiPost(action, body) {
   return await res.json();
 }
 
-/************ “FEELS FAST” FLOW ************/
-/* 1) show "Scanned ✅" immediately
-   2) lookup (optional)
-   3) log
-*/
+/************ MAIN FLOW ************/
+let lastScanned = "";
+let lastScanAt = 0;
+
 async function handleId(sid, source = "manual") {
   const id = String(sid || "").trim();
   if (!id) return;
 
-  studentIdEl.value = id;
+  // de-dupe (prevents double logs if camera fires twice)
+  const now = Date.now();
+  if (id === lastScanned && (now - lastScanAt) < 1500) return;
+  lastScanned = id;
+  lastScanAt = now;
 
-  // Instant feedback (this is what fixes the “feels slow” part)
+  studentIdEl.value = id;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // Optional: show cached-ish student info first
+  // quick lookup for UI (optional)
   try {
     const student = await apiGet("getStudent", { student_id: id });
     if (student.ok && student.found) {
-      nameEl.textContent = student.name || `${student.first_name || ""} ${student.last_name || ""}`.trim();
+      nameEl.textContent =
+        student.name || `${student.first_name || ""} ${student.last_name || ""}`.trim();
       yearEl.textContent = (student.grade ?? student.class_year ?? "-");
       teamEl.textContent = student.team || "-";
     } else {
@@ -91,11 +99,9 @@ async function handleId(sid, source = "manual") {
       setStatus("Student not found.");
       return;
     }
-  } catch (_) {
-    // even if lookup fails, still attempt log
-  }
+  } catch (_) {}
 
-  // Log scan (the slow part)
+  // log (slow part)
   try {
     const logRes = await apiPost("logScan", {
       student_id: id,
@@ -120,86 +126,148 @@ async function handleId(sid, source = "manual") {
   }
 }
 
-/************ BUTTONS ************/
 lookupBtn?.addEventListener("click", () => handleId(studentIdEl.value, "submit"));
 studentIdEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleId(studentIdEl.value, "enter");
 });
 
-/************ CAMERA ************/
-let stopFn = null;
-let running = false;
+/************ CAMERA (CODE 128 TUNED) ************/
+let controls = null;
+let track = null;
+
+function buildReader() {
+  // Restrict to Code 128 for speed + accuracy
+  const hints = new Map();
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.CODE_128]);
+  hints.set(DecodeHintType.TRY_HARDER, true);
+
+  return new BrowserMultiFormatReader(hints, {
+    delayBetweenScanAttempts: 60, // keep trying quickly
+    delayBetweenScanSuccess: 300
+  });
+}
+
+async function trySetZoom(z) {
+  try {
+    if (!track) return;
+    const caps = track.getCapabilities?.();
+    if (!caps?.zoom) return;
+    const zoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, z));
+    await track.applyConstraints({ advanced: [{ zoom }] });
+  } catch (_) {}
+}
+
+async function trySetTorch(on) {
+  try {
+    if (!track) return false;
+    const caps = track.getCapabilities?.();
+    if (!caps?.torch) return false;
+    await track.applyConstraints({ advanced: [{ torch: !!on }] });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function ensureTorchButton() {
+  // optional: add a Torch button if not already there
+  if (document.getElementById("torchBtn")) return;
+
+  const controlsBar = document.getElementById("camControls");
+  if (!controlsBar) return;
+
+  const btn = document.createElement("button");
+  btn.id = "torchBtn";
+  btn.textContent = "Torch";
+  btn.style.background = "#fff";
+  btn.style.border = "none";
+  btn.style.minWidth = "120px";
+
+  let torchOn = false;
+  btn.addEventListener("click", async () => {
+    torchOn = !torchOn;
+    const ok = await trySetTorch(torchOn);
+    if (!ok) {
+      torchOn = false;
+      setStatus("Torch not supported on this device/browser.");
+    } else {
+      setStatus(torchOn ? "Torch ON" : "Torch OFF");
+    }
+  });
+
+  controlsBar.appendChild(btn);
+}
 
 async function startCamera() {
-  if (running) return;
-  running = true;
+  if (controls) return;
+
+  setStatus("Opening camera…");
+
+  const reader = buildReader();
+
+  const constraints = {
+    video: {
+      facingMode: { ideal: "environment" },
+      width: { ideal: 1920 },
+      height: { ideal: 1080 }
+    }
+  };
 
   try {
-    setStatus("Opening camera…");
-
-    const reader = new BrowserMultiFormatReader();
-
-    const constraints = {
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      }
-    };
-
-    const controls = await reader.decodeFromConstraints(
+    controls = await reader.decodeFromConstraints(
       constraints,
       videoEl,
-      (result) => {
+      async (result, err) => {
+        // Keep trying; ignore not-found errors
         if (!result) return;
-        const text = result.getText ? result.getText() : String(result);
+
+        const text = result.getText?.() || "";
         if (!text) return;
 
-        // Stop scanning ASAP so it doesn't double-trigger
-        stopCamera();
+        // Do NOT stop the camera; just log and keep scanning
+        await handleId(text.trim(), "camera");
 
-        // Handle the ID
-        handleId(text.trim(), "camera");
+        // small cooldown so you can move to next badge
+        await new Promise(r => setTimeout(r, 800));
       }
     );
 
-    // Optional zoom help (if device supports it)
-    try {
-      const stream = videoEl.srcObject;
-      const track = stream?.getVideoTracks?.()[0];
-      const caps = track?.getCapabilities?.();
-      if (caps?.zoom) {
-        const z = Math.min(caps.zoom.max, Math.max(caps.zoom.min, 2));
-        await track.applyConstraints({ advanced: [{ zoom: z }] });
-      }
-    } catch (_) {}
+    // get track for zoom/torch tweaks
+    const stream = videoEl.srcObject;
+    track = stream?.getVideoTracks?.()[0] || null;
 
-    stopFn = () => controls.stop();
+    // Zoom helps Code 128 on badges a LOT
+    await trySetZoom(2.5);
+
+    // Add Torch button if device supports it
+    ensureTorchButton();
+
     setStatus("Camera ready — aim barcode inside box.");
-  } catch (err) {
-    setStatus("Camera error: " + String(err));
+  } catch (e) {
+    setStatus("Camera error: " + String(e));
     stopCamera();
-  } finally {
-    running = false;
   }
 }
 
 function stopCamera() {
-  try { if (stopFn) stopFn(); } catch (_) {}
-  stopFn = null;
-  running = false;
+  try { controls?.stop(); } catch (_) {}
+  controls = null;
+
+  try { track?.stop(); } catch (_) {}
+  track = null;
+
   setStatus("Camera stopped.");
 }
 
 scanBtn?.addEventListener("click", startCamera);
 stopBtn?.addEventListener("click", stopCamera);
 
-// Warm-up ping to reduce first-request cold start
+/************ WARM-UP (reduces “first scan” slowness) ************/
 (async () => {
   try {
     await apiGet("ping");
     setStatus("Ready.");
   } catch (_) {
-    setStatus("Ready (no ping).");
+    setStatus("Ready.");
   }
 })();
