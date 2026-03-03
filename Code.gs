@@ -160,23 +160,42 @@ function incrementCount_(studentId) {
 
 /************** THRESHOLDS -> TIER **************/
 function getThresholds_() {
-  const cache = CacheService.getScriptCache();
-  const key = `THRESH_${LOG_SHEET_ID}_${THRESHOLDS_TAB_NAME}`;
-  const cached = cache.get(key);
-  if (cached) return JSON.parse(cached);
-
   const sh = getSheet_(LOG_SHEET_ID, THRESHOLDS_TAB_NAME);
   const vals = sh.getDataRange().getValues();
-  if (vals.length < 2) {
-    // fallback tiers if sheet not configured
-    const fallback = [
-      { min: 0, max: 0, label: "OK", color: "#00c853" },
-      { min: 1, max: 2, label: "Warning", color: "#ffd600" },
-      { min: 3, max: 999999, label: "Violation", color: "#d50000" }
-    ];
-    cache.put(key, JSON.stringify(fallback), 300);
-    return fallback;
+  if (vals.length < 2) return [];
+
+  const headers = vals[0].map(h => String(h).trim().toLowerCase());
+
+  const minI = headers.indexOf("min");
+  const maxI = headers.indexOf("max");
+  const rI = headers.indexOf("r");
+  const gI = headers.indexOf("g");
+  const bI = headers.indexOf("b");
+  const titleI = headers.indexOf("title");
+
+  const tiers = [];
+
+  for (let i = 1; i < vals.length; i++) {
+    const row = vals[i];
+    const min = Number(row[minI] ?? 0);
+    const max = Number(row[maxI] ?? 999999);
+
+    const r = Number(row[rI] ?? 0);
+    const g = Number(row[gI] ?? 0);
+    const b = Number(row[bI] ?? 0);
+
+    const title = titleI !== -1 ? String(row[titleI] ?? "") : "";
+
+    tiers.push({
+      min,
+      max,
+      label: title,
+      color: `rgb(${r},${g},${b})`
+    });
   }
+
+  return tiers;
+}
 
   const headers = vals[0].map(h => String(h).trim().toLowerCase());
   const minI = headers.indexOf("min");
@@ -304,3 +323,4 @@ function doPost(e) {
     return jsonOut({ ok: false, error: String(err) });
   }
 }
+
