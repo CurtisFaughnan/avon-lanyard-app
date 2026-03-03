@@ -5,7 +5,7 @@ const ROSTER_TAB_NAME = "Lanyard_Data";
 const LOG_SHEET_ID    = "1RnnPmQITQtevn04cMKw_PMflLr7jbAeDJ3PfXZaBDwE";
 const LOG_TAB_NAME    = "lanyard_log";
 
-const COUNTS_TAB_NAME = "Counts";      // we will create this tab if it doesn't exist
+const COUNTS_TAB_NAME = "Counts";      // created if missing
 const THRESHOLDS_TAB_NAME = "Thresholds";
 
 const APP_NAME        = "Lanyard";
@@ -39,27 +39,27 @@ function jsonOut(obj) {
 function getSheet_(spreadsheetId, tabName) {
   const ss = SpreadsheetApp.openById(spreadsheetId);
   let sh = ss.getSheetByName(tabName);
-  if (!sh) {
-    sh = ss.insertSheet(tabName);
-  }
+  if (!sh) sh = ss.insertSheet(tabName);
   return sh;
 }
 
 function ensureLogHeader_(sh) {
   const desired = ["date", "student_id", "name", "grade", "team", "violations_after_reset", "parent_email"];
-  const lastRow = sh.getLastRow();
-  if (lastRow === 0) sh.appendRow(desired);
+  if (sh.getLastRow() === 0) sh.appendRow(desired);
   return desired;
 }
 
 function ensureCountsHeader_(sh) {
   const desired = ["student_id", "count", "last_updated"];
-  const lastRow = sh.getLastRow();
-  if (lastRow === 0) sh.appendRow(desired);
+  if (sh.getLastRow() === 0) sh.appendRow(desired);
   return desired;
 }
 
-// Faster roster lookup: read once per request (still ok) + cache for 5 minutes
+function formatTS_() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+}
+
+/************** ROSTER (CACHED) **************/
 function getRosterCacheKey_() {
   return `ROSTER_CACHE_${ROSTER_SHEET_ID}_${ROSTER_TAB_NAME}`;
 }
@@ -78,7 +78,7 @@ function getRosterValuesCached_() {
   const rows = values.slice(1);
 
   const obj = { headers, rows };
-  cache.put(key, JSON.stringify(obj), 300); // 5 minutes
+  cache.put(key, JSON.stringify(obj), 300); // 5 min
   return obj;
 }
 
@@ -123,7 +123,7 @@ function findStudentById_(studentId) {
 }
 
 /************** COUNTS (FAST) **************/
-function getOrInitCountRow_(countsSh, studentId) {
+function getCountRow_(countsSh, studentId) {
   ensureCountsHeader_(countsSh);
 
   const lastRow = countsSh.getLastRow();
@@ -143,10 +143,10 @@ function getOrInitCountRow_(countsSh, studentId) {
 
 function incrementCount_(studentId) {
   const countsSh = getSheet_(LOG_SHEET_ID, COUNTS_TAB_NAME);
-  const found = getOrInitCountRow_(countsSh, studentId);
+  const found = getCountRow_(countsSh, studentId);
 
   const newCount = (found.count || 0) + 1;
-  const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+  const ts = formatTS_();
 
   if (found.row) {
     countsSh.getRange(found.row, 2).setValue(newCount);
@@ -159,7 +159,16 @@ function incrementCount_(studentId) {
 }
 
 /************** THRESHOLDS -> TIER **************/
+function getThresholdsCacheKey_() {
+  return `THRESHOLDS_CACHE_${LOG_SHEET_ID}_${THRESHOLDS_TAB_NAME}`;
+}
+
 function getThresholds_() {
+  const cache = CacheService.getScriptCache();
+  const key = getThresholdsCacheKey_();
+  const cached = cache.get(key);
+  if (cached) return JSON.parse(cached);
+
   const sh = getSheet_(LOG_SHEET_ID, THRESHOLDS_TAB_NAME);
   const vals = sh.getDataRange().getValues();
   if (vals.length < 2) return [];
@@ -174,11 +183,12 @@ function getThresholds_() {
   const titleI = headers.indexOf("title");
 
   const tiers = [];
-
   for (let i = 1; i < vals.length; i++) {
     const row = vals[i];
     const min = Number(row[minI] ?? 0);
     const max = Number(row[maxI] ?? 999999);
+
+    if (isNaN(min) || isNaN(max)) continue;
 
     const r = Number(row[rI] ?? 0);
     const g = Number(row[gI] ?? 0);
@@ -194,26 +204,7 @@ function getThresholds_() {
     });
   }
 
-  return tiers;
-}
-
-  const headers = vals[0].map(h => String(h).trim().toLowerCase());
-  const minI = headers.indexOf("min");
-  const maxI = headers.indexOf("max");
-  const labelI = headers.indexOf("label");
-  const colorI = headers.indexOf("color");
-
-  const tiers = [];
-  for (let r = 1; r < vals.length; r++) {
-    const row = vals[r];
-    const min = Number(row[minI] ?? 0);
-    const max = Number(row[maxI] ?? 999999);
-    const label = labelI !== -1 ? String(row[labelI] ?? "") : "";
-    const color = colorI !== -1 ? String(row[colorI] ?? "") : "";
-    if (!isNaN(min) && !isNaN(max)) tiers.push({ min, max, label, color });
-  }
-
-  cache.put(key, JSON.stringify(tiers), 300);
+  cache.put(key, JSON.stringify(tiers), 300); // 5 min
   return tiers;
 }
 
@@ -236,7 +227,7 @@ function doGet(e) {
     }
 
     if (action === "getstudent") {
-      const sid = e.parameter.student_id || "";
+      const sid = e?.parameter?.student_id || "";
       const st = findStudentById_(sid);
       return jsonOut({ ok: true, ...st, app: APP_NAME });
     }
@@ -257,7 +248,6 @@ function doPost(e) {
     // --- LOG SCAN ---
     if (action === "logscan") {
       const sid = String(body.student_id || "").trim();
-      const device = String(body.device_name || "").trim();
       if (!sid) return jsonOut({ ok: false, error: "Missing student_id" });
 
       const st = findStudentById_(sid);
@@ -267,11 +257,11 @@ function doPost(e) {
       const newCount = incrementCount_(sid);
       const tier = tierForCount_(newCount);
 
-      // write log row in your required format
+      // log row in required format
       const logSh = getSheet_(LOG_SHEET_ID, LOG_TAB_NAME);
       ensureLogHeader_(logSh);
 
-      const ts = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      const ts = formatTS_();
       const gradeInt = st.grade === "" ? "" : Number(st.grade);
 
       logSh.appendRow([
@@ -324,4 +314,8 @@ function doPost(e) {
   }
 }
 
-
+/************** MANUAL TEST (RUN ONCE TO AUTHORIZE) **************/
+function testAccess() {
+  const ss = SpreadsheetApp.openById(ROSTER_SHEET_ID);
+  Logger.log("Access OK. Sheet name: " + ss.getName());
+}
