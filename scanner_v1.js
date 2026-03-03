@@ -1,7 +1,7 @@
 import {
   BrowserMultiFormatReader,
   BarcodeFormat,
-  DecodeHintType
+  DecodeHintType,
 } from "https://cdn.skypack.dev/@zxing/browser@0.1.5";
 
 const cfg = window.APP_CONFIG;
@@ -10,17 +10,14 @@ const cfg = window.APP_CONFIG;
 const titleEl = document.getElementById("title");
 const studentIdEl = document.getElementById("studentId");
 const lookupBtn = document.getElementById("lookupBtn");
-
 const nameEl = document.getElementById("name");
 const yearEl = document.getElementById("year");
 const teamEl = document.getElementById("team");
 const countEl = document.getElementById("count");
 const statusEl = document.getElementById("status");
-
 const videoEl = document.getElementById("video");
 const scanBtn = document.getElementById("scanBtn");
 const stopBtn = document.getElementById("closeScan");
-
 const cardEl = document.getElementById("card"); // optional
 
 /************ INIT ************/
@@ -41,53 +38,15 @@ function setTierColor(colorCss) {
   cardEl.classList.add("tierGlow");
 }
 
+/**
+ * Your index.html already has #guide and #guideLabel.
+ * Don’t add/force a fullscreen overlay; keep your layout stable.
+ */
 function ensureScanOverlay() {
-  // Creates a visible “put barcode here” box over the video (bottom half)
-  if (document.getElementById("scanBoxOverlay")) return;
-
-  const wrap = document.getElementById("scanner") || videoEl?.parentElement;
-  if (!wrap) return;
-
-  // make wrapper positionable
-  if (wrap.style.position !== "fixed" && wrap.style.position !== "relative") {
-    wrap.style.position = "fixed";
-    wrap.style.inset = "0";
-    wrap.style.background = "#000";
-    wrap.style.zIndex = "9999";
-  }
-
-  const overlay = document.createElement("div");
-  overlay.id = "scanBoxOverlay";
-  overlay.style.position = "absolute";
-  overlay.style.left = "0";
-  overlay.style.right = "0";
-  overlay.style.bottom = "0";
-  overlay.style.height = "50%";
-  overlay.style.pointerEvents = "none";
-  overlay.style.display = "flex";
-  overlay.style.alignItems = "center";
-  overlay.style.justifyContent = "center";
-
-  const box = document.createElement("div");
-  box.style.width = "86%";
-  box.style.maxWidth = "520px";
-  box.style.height = "45%";
-  box.style.border = "4px solid rgba(255,255,255,0.9)";
-  box.style.borderRadius = "18px";
-  box.style.boxShadow = "0 0 0 9999px rgba(0,0,0,0.35) inset";
-  box.style.display = "flex";
-  box.style.alignItems = "center";
-  box.style.justifyContent = "center";
-  box.style.fontFamily = "Arial, sans-serif";
-  box.style.fontSize = "18px";
-  box.style.color = "white";
-  box.style.textShadow = "0 1px 2px rgba(0,0,0,0.7)";
-  box.textContent = "Place barcode inside box";
-
-  overlay.appendChild(box);
-  wrap.appendChild(overlay);
+  if (document.getElementById("guide")) return; // already provided by HTML
 }
 
+/************ API ************/
 async function apiGet(action, params) {
   const url = new URL(cfg.apiUrl);
   url.searchParams.set("action", action);
@@ -102,13 +61,13 @@ async function apiPost(action, body) {
   url.searchParams.set("action", action);
   const payload = { ...(body || {}), school_key: cfg.schoolKey };
 
+  // text/plain avoids CORS preflight in most browsers (including iOS Safari)
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" },
     body: JSON.stringify(payload),
-    cache: "no-store"
+    cache: "no-store",
   });
-
   return await res.json();
 }
 
@@ -126,20 +85,25 @@ async function processScan(id, source) {
 
   // de-dupe (prevents double logs if camera fires twice)
   const now = Date.now();
-  if (sid === lastScanned && (now - lastScanAt) < 1500) return;
+  if (sid === lastScanned && now - lastScanAt < 1500) return;
   lastScanned = sid;
   lastScanAt = now;
 
   studentIdEl.value = sid;
   setStatus(`Scanned ✅ (${source}) — logging…`);
 
-  // Lookup for UI
-  const student = await apiGet("getStudent", { student_id: sid });
-  if (!student.ok) {
-    setStatus("Lookup error: " + (student.error || "unknown"));
+  // ✅ ONE CALL ONLY: logScan already returns student + total_count + tier
+  const logRes = await apiPost("logScan", {
+    student_id: sid,
+    device_name: navigator.userAgent,
+  });
+
+  if (!logRes.ok) {
+    setStatus("Log error: " + (logRes.error || "unknown"));
     return;
   }
-  if (!student.found) {
+
+  if (!logRes.found) {
     nameEl.textContent = "-";
     yearEl.textContent = "-";
     teamEl.textContent = "-";
@@ -149,25 +113,11 @@ async function processScan(id, source) {
     return;
   }
 
+  const st = logRes.student || {};
   nameEl.textContent =
-    student.name || `${student.first_name || ""} ${student.last_name || ""}`.trim();
-  yearEl.textContent = (student.grade ?? student.class_year ?? "-");
-  teamEl.textContent = student.team || "-";
-
-  // Log (slow part)
-  const logRes = await apiPost("logScan", {
-    student_id: sid,
-    device_name: navigator.userAgent
-  });
-
-  if (!logRes.ok) {
-    setStatus("Log error: " + (logRes.error || "unknown"));
-    return;
-  }
-  if (!logRes.found) {
-    setStatus("Student not found (log).");
-    return;
-  }
+    st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
+  yearEl.textContent = st.grade ?? st.class_year ?? "-";
+  teamEl.textContent = st.team || "-";
 
   countEl.textContent = String(logRes.total_count ?? "-");
   const tier = logRes.tier || {};
@@ -195,7 +145,6 @@ async function handleId(sid, source = "manual") {
   if (queuedId) {
     const next = queuedId;
     queuedId = null;
-    // slight delay so user can move badge away
     setTimeout(() => handleId(next, "camera"), 250);
   }
 }
@@ -205,18 +154,31 @@ studentIdEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleId(studentIdEl.value, "enter");
 });
 
-/************ CAMERA (CODE 128 TUNED) ************/
+/************ CAMERA ************/
 let controls = null;
 let track = null;
 
 function buildReader() {
   const hints = new Map();
-  hints.set(DecodeHintType.POSSIBLE_FORMATS, [BarcodeFormat.CODE_128]);
+
+  // ✅ Big fix: don’t lock to only CODE_128.
+  // Numeric barcodes are commonly ITF, EAN/UPC, Code39, Codabar, etc.
+  hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+    BarcodeFormat.CODE_128,
+    BarcodeFormat.ITF,
+    BarcodeFormat.EAN_13,
+    BarcodeFormat.EAN_8,
+    BarcodeFormat.UPC_A,
+    BarcodeFormat.UPC_E,
+    BarcodeFormat.CODE_39,
+    BarcodeFormat.CODABAR,
+  ]);
+
   hints.set(DecodeHintType.TRY_HARDER, true);
 
   return new BrowserMultiFormatReader(hints, {
-    delayBetweenScanAttempts: 40,
-    delayBetweenScanSuccess: 250
+    delayBetweenScanAttempts: 30,
+    delayBetweenScanSuccess: 250,
   });
 }
 
@@ -242,12 +204,24 @@ async function trySetTorch(on) {
   }
 }
 
-function ensureTorchButton() {
-  // Put a torch button next to Close (only once)
-  if (document.getElementById("torchBtn")) return;
+async function trySetFocusContinuous() {
+  try {
+    if (!track) return;
+    const caps = track.getCapabilities?.();
+    if (caps?.focusMode?.includes?.("continuous")) {
+      await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] });
+    }
+  } catch (_) {}
+}
 
-  const wrap = document.getElementById("scanner") || videoEl?.parentElement;
+function ensureTorchButton() {
+  // Put a torch button near top-right (only once)
+  if (document.getElementById("torchBtn")) return;
+  const wrap = videoEl?.parentElement;
   if (!wrap) return;
+
+  // ensure position for absolute button
+  if (!wrap.style.position) wrap.style.position = "relative";
 
   const btn = document.createElement("button");
   btn.id = "torchBtn";
@@ -279,10 +253,16 @@ async function startCamera() {
 
   setStatus("Opening camera…");
 
-  // iOS/Safari needs playsinline + muted for reliable autoplay
+  // iOS/Safari reliability
   if (videoEl) {
     videoEl.setAttribute("playsinline", "");
     videoEl.muted = true;
+    videoEl.autoplay = true;
+
+    // Make sure the video is sized and sharp enough
+    videoEl.style.width = "100%";
+    videoEl.style.height = "100%";
+    videoEl.style.objectFit = "cover";
   }
 
   ensureScanOverlay();
@@ -293,32 +273,29 @@ async function startCamera() {
     video: {
       facingMode: { ideal: "environment" },
       width: { ideal: 1920 },
-      height: { ideal: 1080 }
-    }
+      height: { ideal: 1080 },
+    },
   };
 
   try {
-    // IMPORTANT: callback is NOT async; do not await inside decode loop
-    controls = await reader.decodeFromConstraints(
-      constraints,
-      videoEl,
-      (result) => {
-        if (!result) return;
-        const text = result.getText?.();
-        if (!text) return;
-        handleId(String(text).trim(), "camera");
-      }
-    );
+    controls = await reader.decodeFromConstraints(constraints, videoEl, (result) => {
+      if (!result) return;
+      const text = result.getText?.();
+      if (!text) return;
+      handleId(String(text).trim(), "camera");
+    });
 
     const stream = videoEl?.srcObject;
     track = stream?.getVideoTracks?.()[0] || null;
 
-    // Zoom helps a ton on badges
-    await trySetZoom(2.5);
+    // Best-effort camera tuning
+    await trySetFocusContinuous();
+
+    // iPhone digital zoom can sometimes blur; keep modest.
+    await trySetZoom(1.5);
 
     ensureTorchButton();
-
-    setStatus("Camera ready — put barcode in box (bottom half).");
+    setStatus("Camera ready — put barcode inside the box.");
   } catch (e) {
     setStatus("Camera error: " + String(e));
     stopCamera();
@@ -326,14 +303,19 @@ async function startCamera() {
 }
 
 function stopCamera() {
-  try { controls?.stop(); } catch (_) {}
+  try {
+    controls?.stop();
+  } catch (_) {}
   controls = null;
 
-  try { track?.stop(); } catch (_) {}
+  try {
+    track?.stop();
+  } catch (_) {}
   track = null;
 
-  // remove torch button (optional)
-  try { document.getElementById("torchBtn")?.remove(); } catch (_) {}
+  try {
+    document.getElementById("torchBtn")?.remove();
+  } catch (_) {}
 
   setStatus("Camera stopped.");
 }
