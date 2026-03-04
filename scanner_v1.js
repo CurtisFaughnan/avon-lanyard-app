@@ -10,10 +10,13 @@ const yearEl = document.getElementById("year");
 const teamEl = document.getElementById("team");
 const countEl = document.getElementById("count");
 const statusEl = document.getElementById("status");
-const videoEl = document.getElementById("video");
+
 const scanBtn = document.getElementById("scanBtn");
+const scanOnceBtn = document.getElementById("scanOnceBtn");
 const stopBtn = document.getElementById("closeScan");
-const cardEl = document.getElementById("card"); // optional
+
+const scannerEl = document.getElementById("scanner");
+const cardEl = document.getElementById("card");
 
 /************ INIT ************/
 if (titleEl) titleEl.textContent = cfg?.appLabel || "Lanyard App";
@@ -67,6 +70,7 @@ async function processScan(id, source) {
   const sid = String(id || "").trim();
   if (!sid) return;
 
+  // de-dupe double reads
   const now = Date.now();
   if (sid === lastScanned && now - lastScanAt < 1500) return;
   lastScanned = sid;
@@ -96,10 +100,7 @@ async function processScan(id, source) {
   }
 
   const st = logRes.student || {};
-  if (nameEl) {
-    nameEl.textContent =
-      st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
-  }
+  if (nameEl) nameEl.textContent = st.name || `${st.first_name || ""} ${st.last_name || ""}`.trim();
   if (yearEl) yearEl.textContent = st.grade ?? st.class_year ?? "-";
   if (teamEl) teamEl.textContent = st.team || "-";
 
@@ -127,7 +128,7 @@ async function handleId(sid, source = "manual") {
   if (queuedId) {
     const next = queuedId;
     queuedId = null;
-    setTimeout(() => handleId(next, "camera"), 250);
+    setTimeout(() => handleId(next, "camera"), 200);
   }
 }
 
@@ -136,60 +137,65 @@ studentIdEl?.addEventListener("keydown", (e) => {
   if (e.key === "Enter") handleId(studentIdEl?.value, "enter");
 });
 
-/************ QUAGGA2 SCANNER ************/
+/************ QUAGGA2 (Scan-on-button) ************/
+let quaggaReady = false;
 let quaggaRunning = false;
-let detectedHandler = null;
+let lastDetectedCode = "";
 
-function ensureVideoInline() {
-  if (!videoEl) return;
-  videoEl.setAttribute("playsinline", "");
-  videoEl.muted = true;
-  videoEl.autoplay = true;
-  videoEl.style.width = "100%";
-  videoEl.style.height = "100%";
-  videoEl.style.objectFit = "cover";
+// We capture the last detection but DON'T auto-log it.
+// "Scan Now" decides when to submit.
+function attachDetectedHandler() {
+  Quagga.offDetected(onDetectedSafe);
+  Quagga.onDetected(onDetectedSafe);
+}
+
+function onDetectedSafe(data) {
+  const code = data?.codeResult?.code;
+  if (!code) return;
+
+  const cleaned = String(code).trim();
+
+  // avoid flicker from repeated same value
+  if (cleaned && cleaned !== lastDetectedCode) {
+    lastDetectedCode = cleaned;
+    setStatus(`Barcode found ✅ (${cleaned}) — tap "Scan Now"`);
+  }
 }
 
 function stopScanner() {
-  if (!window.Quagga) return;
-
-  try {
-    if (detectedHandler) Quagga.offDetected(detectedHandler);
-  } catch (_) {}
-  detectedHandler = null;
-
   try {
     if (quaggaRunning) Quagga.stop();
   } catch (_) {}
 
   quaggaRunning = false;
+  quaggaReady = false;
+  lastDetectedCode = "";
   setStatus("Camera stopped.");
 }
 
-async function startScanner() {
+function startScanner() {
   if (!window.Quagga) {
-    setStatus("Scanner library not loaded (Quagga). Check index.html script tag.");
+    setStatus("Quagga2 not loaded — check index.html script tag.");
+    return;
+  }
+  if (!scannerEl) {
+    setStatus("Missing #scanner container in index.html");
     return;
   }
 
-  // stop any previous run (prevents “camera in use”)
   stopScanner();
-  ensureVideoInline();
-
   setStatus("Opening camera…");
 
-  // IMPORTANT: this tells Quagga to use YOUR <video id="video"> element
   const config = {
     inputStream: {
       type: "LiveStream",
-      target: videoEl,
+      target: scannerEl, // ✅ DIV container (most reliable on iPhone)
       constraints: {
         facingMode: "environment",
         width: { ideal: 1920 },
         height: { ideal: 1080 },
       },
-
-      // Crop to the center area (like your guide box) -> faster & more accurate
+      // match your guide box region
       area: {
         top: "35%",
         right: "10%",
@@ -197,22 +203,17 @@ async function startScanner() {
         bottom: "35%",
       },
     },
-
     locator: {
       halfSample: true,
       patchSize: "medium",
     },
-
     locate: true,
-
     decoder: {
-      // Your badge is 14 digits (often ITF / Interleaved 2 of 5)
-      // Also keep code_128 as fallback.
+      // 14-digit badge is often ITF (i2of5); keep code_128 as fallback
       readers: ["i2of5_reader", "code_128_reader"],
       multiple: false,
     },
-
-    numOfWorkers: 0, // iOS Safari is happier without web workers
+    numOfWorkers: 0, // iOS Safari is happiest without workers
   };
 
   Quagga.init(config, (err) => {
@@ -220,21 +221,32 @@ async function startScanner() {
       setStatus("Camera error: " + (err?.message || String(err)));
       return;
     }
-
+    quaggaReady = true;
     quaggaRunning = true;
+    attachDetectedHandler();
     Quagga.start();
-    setStatus("Camera ready — scan the barcode.");
-
-    detectedHandler = (data) => {
-      const code = data?.codeResult?.code;
-      if (code) handleId(String(code).trim(), "camera");
-    };
-
-    Quagga.onDetected(detectedHandler);
+    setStatus('Camera ready — point at barcode, then tap "Scan Now".');
   });
 }
 
+// ✅ Scan button: submit the last detected barcode
+function scanNow() {
+  if (!quaggaRunning) {
+    setStatus('Camera not running. Tap "Start Camera" first.');
+    return;
+  }
+
+  if (!lastDetectedCode) {
+    setStatus("No barcode found yet — hold steady and try again.");
+    return;
+  }
+
+  // submit the last seen code
+  handleId(lastDetectedCode, "scan-now");
+}
+
 scanBtn?.addEventListener("click", startScanner);
+scanOnceBtn?.addEventListener("click", scanNow);
 stopBtn?.addEventListener("click", stopScanner);
 
 document.addEventListener("visibilitychange", () => {
